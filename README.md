@@ -38,7 +38,7 @@ This lets you install the extension directly from source without waiting for sto
 
 **Option B: Clone with Git**
 ```bash
-git clone https://github.com/beaux-riel/wavelength-extension.git
+git clone https://github.com/heybeaux/wavelength-extension.git
 ```
 
 ### Step 2 — Open Chrome Extensions
@@ -97,7 +97,7 @@ We'll notify users via the dashboard when a new version is available.
 
 ## Feedback & Issues
 
-Found a bug or have a feature request? [Open an issue](https://github.com/beaux-riel/wavelength-extension/issues) or reach out at [hello@mywavelength.ai](mailto:hello@mywavelength.ai).
+Found a bug or have a feature request? [Open an issue](https://github.com/heybeaux/wavelength-extension/issues) or reach out at [hello@mywavelength.ai](mailto:hello@mywavelength.ai).
 
 ---
 
