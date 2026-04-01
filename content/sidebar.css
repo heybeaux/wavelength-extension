@@ -1,0 +1,276 @@
+/* Wavelength — Grammarly-style floating button + card */
+
+/* ─── Floating button ─────────────────────────────────────────────── */
+.wl-btn {
+  position: absolute;
+  bottom: 8px;
+  right: 48px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #4f46e5;
+  color: white;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.4);
+  z-index: 9999;
+  transition: transform 0.2s, box-shadow 0.2s;
+  line-height: 1;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+.wl-btn:hover {
+  transform: scale(1.1);
+}
+
+.wl-btn.wl-ready {
+  animation: wl-pulse 2s infinite;
+}
+
+.wl-btn.wl-loading {
+  pointer-events: none;
+  opacity: 0.8;
+}
+
+@keyframes wl-pulse {
+  0%, 100% { box-shadow: 0 2px 8px rgba(79, 70, 229, 0.4); }
+  50% { box-shadow: 0 2px 16px rgba(79, 70, 229, 0.8); }
+}
+
+/* Tiny spinner inside button */
+.wl-btn-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: wl-spin 0.7s linear infinite;
+}
+
+/* ─── Floating card ───────────────────────────────────────────────── */
+.wl-card {
+  position: absolute;
+  bottom: 48px;
+  right: 8px;
+  width: 300px;
+  max-height: 380px;
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.15);
+  border: 1px solid #e2e8f0;
+  z-index: 10000;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 13px;
+  color: #1e293b;
+  animation: wl-fadeIn 0.15s ease;
+}
+
+.wl-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #f1f5f9;
+  background: #f8fafc;
+}
+
+.wl-card-logo {
+  font-size: 16px;
+}
+
+.wl-card-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: #1e293b;
+  flex: 1;
+}
+
+.wl-card-close {
+  background: none;
+  border: none;
+  font-size: 18px;
+  color: #94a3b8;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.wl-card-close:hover {
+  color: #64748b;
+}
+
+.wl-card-body {
+  padding: 12px;
+  overflow-y: auto;
+  max-height: 320px;
+}
+
+/* ─── Card content states ─────────────────────────────────────────── */
+.wl-hint {
+  color: #94a3b8;
+  font-size: 12px;
+  text-align: center;
+  padding: 12px 0;
+  line-height: 1.5;
+}
+
+.wl-hint a {
+  color: #6366f1;
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.wl-hint a:hover {
+  text-decoration: underline;
+}
+
+.wl-card-loading {
+  text-align: center;
+  padding: 16px 0;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.wl-spinner {
+  width: 24px;
+  height: 24px;
+  border: 3px solid #e2e8f0;
+  border-top-color: #6366f1;
+  border-radius: 50%;
+  animation: wl-spin 0.7s linear infinite;
+  margin: 0 auto 8px;
+}
+
+@keyframes wl-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ─── Recipient badge ─────────────────────────────────────────────── */
+.wl-recipient-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+
+.wl-recipient-badge strong {
+  color: #1e293b;
+}
+
+.wl-tag {
+  font-size: 10px;
+  font-weight: 500;
+  color: #6366f1;
+  background: #eef2ff;
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+/* ─── Rewrite section ─────────────────────────────────────────────── */
+.wl-rewrite-section {
+  margin-bottom: 8px;
+}
+
+.wl-rewrite-text {
+  background: #faf5ff;
+  border: 1px solid #e9d5ff;
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #1e293b;
+  max-height: 160px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+/* ─── Action buttons ──────────────────────────────────────────────── */
+.wl-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.wl-btn-use {
+  flex: 1;
+  padding: 7px 10px;
+  background: #6366f1;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.wl-btn-use:hover {
+  background: #4f46e5;
+}
+
+.wl-btn-regen {
+  padding: 7px 10px;
+  background: #f1f5f9;
+  color: #64748b;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.wl-btn-regen:hover {
+  background: #e2e8f0;
+}
+
+/* ─── Applied confirmation ────────────────────────────────────────── */
+.wl-applied {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 6px;
+  color: #16a34a;
+  font-weight: 600;
+  font-size: 12px;
+  margin-top: 8px;
+  animation: wl-fadeIn 0.2s ease;
+}
+
+@keyframes wl-fadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ─── Coaching tip ────────────────────────────────────────────────── */
+.wl-tip {
+  font-size: 11px;
+  color: #64748b;
+  padding: 8px 0 0;
+  border-top: 1px solid #f1f5f9;
+  margin-top: 8px;
+  line-height: 1.4;
+}
+
+.wl-tip strong {
+  color: #475569;
+}
+
+/* ─── Error ───────────────────────────────────────────────────────── */
+.wl-error {
+  color: #dc2626;
+  font-size: 12px;
+  text-align: center;
+  padding: 8px 0;
+}
