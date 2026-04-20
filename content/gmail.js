@@ -504,16 +504,18 @@ function applyRewrite(rewriteText, container, composeEl) {
   // Also update subject line if the rewrite includes a subject suggestion
   updateSubjectIfNeeded(rewriteText, composeEl);
 
-  const appliedContainer = container.querySelector('.wl-applied-container');
-  if (appliedContainer) {
-    appliedContainer.innerHTML = `<div class="wl-applied">\u2713 Applied</div>`;
-    setTimeout(() => { appliedContainer.innerHTML = ''; }, 2500);
+  // Mark the "Use this" button as applied so users can see the state,
+  // but keep the overlay open so they can continue refining (Grammarly-style).
+  const useBtn = container.querySelector('[data-action="use"]');
+  if (useBtn) {
+    useBtn.textContent = '\u2713 Applied';
+    useBtn.disabled = true;
+    useBtn.classList.add('wl-btn-use-applied');
   }
 
-  // Hide card after applying
-  const card = composeEl._wlCard;
-  if (card) {
-    setTimeout(() => { card.style.display = 'none'; }, 1200);
+  const appliedContainer = container.querySelector('.wl-applied-container');
+  if (appliedContainer) {
+    appliedContainer.innerHTML = `<div class="wl-applied">\u2713 Applied \u2014 keep editing for more suggestions</div>`;
   }
 }
 

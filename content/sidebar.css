@@ -217,6 +217,13 @@
   background: #4f46e5;
 }
 
+.wl-btn-use-applied,
+.wl-btn-use-applied:hover {
+  background: #16a34a;
+  cursor: default;
+  opacity: 0.95;
+}
+
 .wl-btn-regen {
   padding: 7px 10px;
   background: #f1f5f9;
