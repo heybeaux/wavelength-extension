@@ -4,6 +4,23 @@
 const DEBOUNCE_MS = 1500;
 const APP_URL = 'https://mywavelength.ai';
 
+// ─── Font injection (MV3-safe) ──────────────────────────────────────
+(function injectFonts() {
+  const fonts = [
+    { family: 'WL Inter Tight', weight: '400', file: 'fonts/InterTight-Regular.ttf' },
+    { family: 'WL Inter Tight', weight: '500', file: 'fonts/InterTight-Medium.ttf' },
+    { family: 'WL Inter Tight', weight: '600', file: 'fonts/InterTight-SemiBold.ttf' },
+    { family: 'WL Inter Tight', weight: '700', file: 'fonts/InterTight-Bold.ttf' },
+    { family: 'WL Fraunces', weight: '600', file: 'fonts/Fraunces_72pt_SuperSoft-SemiBold.ttf' },
+  ];
+  const css = fonts.map(f =>
+    `@font-face { font-family: '${f.family}'; font-style: normal; font-weight: ${f.weight}; font-display: swap; src: url('${chrome.runtime.getURL(f.file)}') format('truetype'); }`
+  ).join('\n');
+  const style = document.createElement('style');
+  style.textContent = css;
+  document.head.appendChild(style);
+})();
+
 let activeComposeEl = null;
 let activeDialog = null;
 let debounceTimer = null;
@@ -11,25 +28,47 @@ let lastDraft = '';
 let lastRewrite = '';
 let emailCache = new Map();
 let hasToken = false;
+let cachedUserInfo = null;
+let applyingRewrite = false;
+let lastEventId = null;
 
 // Track injected buttons per compose element
 const injectedComposes = new WeakSet();
 
-// ─── Bootstrap ─────────────────────────────────────────────────────── 
+// ─── Bootstrap ───────────────────────────────────────────────────────
 // ─── Auth check ──────────────────────────────────────────────────────
 async function checkAuth() {
   try {
     const token = await chrome.runtime.sendMessage({ type: 'GET_TOKEN' });
     hasToken = !!token;
+    if (hasToken) fetchUserInfo();
   } catch {
     hasToken = false;
   }
+}
+
+async function fetchUserInfo() {
+  try {
+    const info = await chrome.runtime.sendMessage({ type: 'GET_USER_INFO' });
+    if (info && !info.error) {
+      cachedUserInfo = info;
+    }
+  } catch {
+    // Non-critical — button will show "W" fallback
+  }
+}
+
+function getUserInitial() {
+  const name = cachedUserInfo?.displayName || cachedUserInfo?.name;
+  if (name) return name.trim().charAt(0).toUpperCase();
+  return 'W';
 }
 
 // Re-check auth whenever token changes (e.g. after sign-in)
 chrome.runtime.onMessage.addListener((message) => {
   if (message.type === 'AUTH_SUCCESS' || message.type === 'SET_TOKEN') {
     hasToken = true;
+    fetchUserInfo();
     // Trigger observer re-scan in case compose is already open
     if (activeComposeEl === null) {
       const editors = document.querySelectorAll(
@@ -62,6 +101,8 @@ checkAuth().then(() => {
 function observeComposeWindows() {
   const observer = new MutationObserver(() => {
     if (!hasToken) return;
+    // Skip observer during our own rewrite to prevent self-detach
+    if (applyingRewrite) return;
 
     // Detect dialog-based compose
     const dialogEditors = document.querySelectorAll(
@@ -106,9 +147,10 @@ function attachToCompose(composeEl) {
   // Listen for input with debounce
   composeEl.addEventListener('input', onComposeInput);
 
-  // Watch for compose close
+  // Watch for compose close (but not during our own rewrite)
   if (activeDialog?.parentNode) {
     const closeObserver = new MutationObserver((mutations) => {
+      if (applyingRewrite) return;
       for (const mutation of mutations) {
         for (const node of mutation.removedNodes) {
           if (node === activeDialog || node.contains?.(composeEl)) {
@@ -121,6 +163,20 @@ function attachToCompose(composeEl) {
     });
     closeObserver.observe(activeDialog.parentNode, { childList: true });
   }
+
+  // Periodically verify our button/card still exist in the DOM; re-inject if Gmail removed them
+  const integrityCheck = setInterval(() => {
+    if (!activeComposeEl || activeComposeEl !== composeEl) {
+      clearInterval(integrityCheck);
+      return;
+    }
+    const btn = composeEl._wlBtn;
+    if (btn && !document.contains(btn)) {
+      // Button was removed from DOM — re-inject
+      injectedComposes.delete(composeEl.closest('.Am') || composeEl.parentElement?.parentElement || composeEl.parentElement);
+      injectFloatingButton(composeEl);
+    }
+  }, 1000);
 }
 
 function detachCompose() {
@@ -131,6 +187,7 @@ function detachCompose() {
   activeDialog = null;
   lastDraft = '';
   lastRewrite = '';
+  lastEventId = null;
   clearTimeout(debounceTimer);
   emailCache.clear();
 }
@@ -151,10 +208,10 @@ function injectFloatingButton(composeEl) {
     composeBody.style.position = 'relative';
   }
 
-  // Create the floating button
+  // Create the floating button with logo SVG
   const btn = document.createElement('button');
   btn.className = 'wl-btn';
-  btn.textContent = 'W';
+  btn.innerHTML = `<svg viewBox="0 0 200 200" width="20" height="20"><defs><linearGradient id="wl-btn-g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FFFDFB"/><stop offset="100%" stop-color="#FFFDFB"/></linearGradient></defs><path d="M 44 54 L 76 146 L 108 85 L 128 128 L 156 92" fill="none" stroke="#FFFDFB" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
   btn.title = 'Wavelength — Communication Coach';
   composeBody.appendChild(btn);
 
@@ -164,10 +221,13 @@ function injectFloatingButton(composeEl) {
   card.style.display = 'none';
   composeBody.appendChild(card);
 
-  // Initial card content
+  // Initial card content — uses inline SVG logo mark from design system
   card.innerHTML = `
     <div class="wl-card-header">
-      <span class="wl-card-logo">\u{1F30A}</span>
+      <svg class="wl-card-logo" viewBox="0 0 200 200" width="20" height="20">
+        <defs><linearGradient id="wl-g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#B8372B"></stop><stop offset="55%" stop-color="#D46A3A"></stop><stop offset="100%" stop-color="#EDA324"></stop></linearGradient></defs><circle cx="100" cy="100" r="96" fill="url(#wl-g)"></circle>
+        <path d="M 44 54 L 76 146 L 108 85 L 128 128 L 156 92" fill="none" stroke="#FFFDFB" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"></path>
+      </svg>
       <span class="wl-card-title">Wavelength</span>
       <button class="wl-card-close">\u00D7</button>
     </div>
@@ -209,6 +269,8 @@ function injectFloatingButton(composeEl) {
 }
 
 // ─── Button state helpers ────────────────────────────────────────────
+const WL_BTN_LOGO = `<svg viewBox="0 0 200 200" width="20" height="20"><path d="M 44 54 L 76 146 L 108 85 L 128 128 L 156 92" fill="none" stroke="#FFFDFB" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
 function setBtnLoading(composeEl) {
   const btn = composeEl?._wlBtn;
   if (!btn) return;
@@ -222,14 +284,14 @@ function setBtnReady(composeEl) {
   if (!btn) return;
   btn.classList.remove('wl-loading');
   btn.classList.add('wl-ready');
-  btn.textContent = 'W';
+  btn.innerHTML = WL_BTN_LOGO;
 }
 
 function setBtnIdle(composeEl) {
   const btn = composeEl?._wlBtn;
   if (!btn) return;
   btn.classList.remove('wl-loading', 'wl-ready');
-  btn.textContent = 'W';
+  btn.innerHTML = WL_BTN_LOGO;
 }
 
 // ─── Card content update ─────────────────────────────────────────────
@@ -362,7 +424,7 @@ function renderResult(container, result, recipientEmails, composeEl) {
   // Wire up "Use this" button
   const useBtn = container.querySelector('[data-action="use"]');
   if (useBtn) {
-    useBtn.addEventListener('click', () => applyRewrite(result.suggested_rewrite, container, composeEl));
+    useBtn.addEventListener('click', () => applyRewrite(result.suggested_rewrite, container, composeEl, result.event_id));
   }
 
   // Wire up "Regenerate" button
@@ -377,6 +439,7 @@ function renderResult(container, result, recipientEmails, composeEl) {
 
 // ─── Input handler with debounce ─────────────────────────────────────
 function onComposeInput() {
+  if (applyingRewrite) return;
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => analyzeCurrentDraft(), DEBOUNCE_MS);
 }
@@ -421,6 +484,7 @@ async function analyzeCurrentDraft() {
       updateCard(activeComposeEl, { status: 'error', message: result.error });
     } else {
       lastRewrite = result.suggested_rewrite || '';
+      lastEventId = result.event_id || null;
       updateCard(activeComposeEl, { status: 'result', result, recipientEmails });
     }
   } catch (err) {
@@ -475,8 +539,18 @@ async function resolveEmails(emails) {
 }
 
 // ─── "Use this" — replace compose content ────────────────────────────
-function applyRewrite(rewriteText, container, composeEl) {
+function applyRewrite(rewriteText, container, composeEl, eventId) {
   if (!composeEl || !rewriteText) return;
+
+  // Record suggestion acceptance and re-score in the backend
+  const acceptEventId = eventId || lastEventId;
+  if (acceptEventId) {
+    chrome.runtime.sendMessage({
+      type: 'ACCEPT_SUGGESTION',
+      eventId: acceptEventId,
+      rewrittenText: rewriteText,
+    }).catch(() => {}); // fire-and-forget
+  }
 
   const editable =
     composeEl.getAttribute('contenteditable') === 'true'
@@ -484,6 +558,10 @@ function applyRewrite(rewriteText, container, composeEl) {
       : composeEl.querySelector('[contenteditable="true"]');
 
   if (!editable) return;
+
+  // Guard: prevent our own DOM changes from triggering detach/re-analysis
+  applyingRewrite = true;
+  clearTimeout(debounceTimer);
 
   // Preserve Gmail's rich formatting: convert newlines to proper Gmail divs
   // and maintain paragraph structure
@@ -501,21 +579,23 @@ function applyRewrite(rewriteText, container, composeEl) {
   editable.dispatchEvent(new Event('input', { bubbles: true }));
   lastDraft = rewriteText;
 
+  // Release the guard after Gmail has settled its DOM updates
+  setTimeout(() => { applyingRewrite = false; }, 500);
+
   // Also update subject line if the rewrite includes a subject suggestion
   updateSubjectIfNeeded(rewriteText, composeEl);
 
-  // Mark the "Use this" button as applied so users can see the state,
-  // but keep the overlay open so they can continue refining (Grammarly-style).
-  const useBtn = container.querySelector('[data-action="use"]');
-  if (useBtn) {
-    useBtn.textContent = '\u2713 Applied';
-    useBtn.disabled = true;
-    useBtn.classList.add('wl-btn-use-applied');
-  }
-
   const appliedContainer = container.querySelector('.wl-applied-container');
   if (appliedContainer) {
-    appliedContainer.innerHTML = `<div class="wl-applied">\u2713 Applied \u2014 keep editing for more suggestions</div>`;
+    appliedContainer.innerHTML = `<div class="wl-applied">\u2713 Applied — edit your draft or regenerate</div>`;
+  }
+
+  // Update button text to indicate applied state, but keep card open
+  const useBtn = container.querySelector('[data-action="use"]');
+  if (useBtn) {
+    useBtn.textContent = 'Applied \u2713';
+    useBtn.disabled = true;
+    useBtn.classList.add('wl-btn-applied');
   }
 }
 

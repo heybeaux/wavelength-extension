@@ -84,6 +84,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       .catch((err) => sendResponse({ error: err.message }));
     return true;
   }
+
+  if (request.type === 'ACCEPT_SUGGESTION') {
+    acceptSuggestion(request.eventId, request.rewrittenText)
+      .then(sendResponse)
+      .catch((err) => sendResponse({ error: err.message }));
+    return true;
+  }
 });
 
 async function handleApiCall(endpoint, method = 'GET', body = null) {
@@ -113,4 +120,9 @@ async function resolveEmail(email) {
 
 async function analyzeMessage(body) {
   return handleApiCall('/coaching/analyze', 'POST', body);
+}
+
+async function acceptSuggestion(eventId, rewrittenText) {
+  const body = rewrittenText ? { rewritten_text: rewrittenText } : {};
+  return handleApiCall(`/coaching/events/${eventId}/accept`, 'PATCH', body);
 }

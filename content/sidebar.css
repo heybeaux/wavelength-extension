@@ -1,4 +1,10 @@
-/* Wavelength — Grammarly-style floating button + card */
+/* Wavelength — Warm design system: floating button + card
+   Colors: terracotta/ochre/sand palette
+   Fonts: Inter Tight (body), Fraunces SuperSoft (display) */
+
+/* ─── Font loading (injected dynamically by gmail.js via chrome.runtime.getURL) ── */
+/* Font families: 'WL Inter Tight' (body), 'WL Fraunces' (display)
+   These @font-face rules are injected at runtime — see gmail.js injectFonts() */
 
 /* ─── Floating button ─────────────────────────────────────────────── */
 .wl-btn {
@@ -8,8 +14,8 @@
   width: 32px;
   height: 32px;
   border-radius: 50%;
-  background: #4f46e5;
-  color: white;
+  background: linear-gradient(135deg, #B8372B 0%, #D46A3A 45%, #EDA324 100%);
+  color: #FFFDFB;
   border: none;
   cursor: pointer;
   font-size: 14px;
@@ -17,16 +23,18 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.4);
+  box-shadow: 0 2px 8px rgba(212, 106, 58, 0.35);
   z-index: 9999;
-  transition: transform 0.2s, box-shadow 0.2s;
+  transition: transform 200ms cubic-bezier(0.2, 0.7, 0.2, 1),
+              box-shadow 200ms cubic-bezier(0.2, 0.7, 0.2, 1);
   line-height: 1;
   padding: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-family: 'WL Inter Tight', -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
 }
 
 .wl-btn:hover {
   transform: scale(1.1);
+  box-shadow: 0 4px 16px rgba(212, 106, 58, 0.45);
 }
 
 .wl-btn.wl-ready {
@@ -39,16 +47,16 @@
 }
 
 @keyframes wl-pulse {
-  0%, 100% { box-shadow: 0 2px 8px rgba(79, 70, 229, 0.4); }
-  50% { box-shadow: 0 2px 16px rgba(79, 70, 229, 0.8); }
+  0%, 100% { box-shadow: 0 2px 8px rgba(212, 106, 58, 0.35); }
+  50% { box-shadow: 0 2px 16px rgba(212, 106, 58, 0.65); }
 }
 
 /* Tiny spinner inside button */
 .wl-btn-spinner {
   width: 16px;
   height: 16px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: white;
+  border: 2px solid rgba(255, 253, 251, 0.3);
+  border-top-color: #FFFDFB;
   border-radius: 50%;
   animation: wl-spin 0.7s linear infinite;
 }
@@ -60,50 +68,55 @@
   right: 8px;
   width: 300px;
   max-height: 380px;
-  background: white;
+  background: #FFFDFB;
   border-radius: 12px;
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.15);
-  border: 1px solid #e2e8f0;
+  box-shadow: 0 4px 24px rgba(74, 33, 21, 0.12), 0 2px 4px rgba(74, 33, 21, 0.06);
+  border: 1px solid #DDD2C0;
   z-index: 10000;
   overflow: hidden;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-family: 'WL Inter Tight', -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
   font-size: 13px;
-  color: #1e293b;
-  animation: wl-fadeIn 0.15s ease;
+  color: #1A1612;
+  animation: wl-fadeIn 0.15s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .wl-card-header {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   padding: 10px 12px;
-  border-bottom: 1px solid #f1f5f9;
-  background: #f8fafc;
+  border-bottom: 1px solid #E8E0D3;
+  background: #FAF6F1;
 }
 
 .wl-card-logo {
-  font-size: 16px;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
 }
 
 .wl-card-title {
+  font-family: 'WL Fraunces', Georgia, serif;
   font-weight: 600;
-  font-size: 13px;
-  color: #1e293b;
+  font-size: 14px;
+  color: #1A1612;
   flex: 1;
+  letter-spacing: -0.02em;
 }
 
 .wl-card-close {
   background: none;
   border: none;
   font-size: 18px;
-  color: #94a3b8;
+  color: #A08F75;
   cursor: pointer;
   padding: 0 4px;
   line-height: 1;
+  transition: color 120ms ease;
 }
 
 .wl-card-close:hover {
-  color: #64748b;
+  color: #5B4F3E;
 }
 
 .wl-card-body {
@@ -114,7 +127,7 @@
 
 /* ─── Card content states ─────────────────────────────────────────── */
 .wl-hint {
-  color: #94a3b8;
+  color: #A08F75;
   font-size: 12px;
   text-align: center;
   padding: 12px 0;
@@ -122,27 +135,29 @@
 }
 
 .wl-hint a {
-  color: #6366f1;
-  text-decoration: none;
+  color: #B8542A;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
   font-weight: 500;
 }
 
 .wl-hint a:hover {
-  text-decoration: underline;
+  color: #D46A3A;
 }
 
 .wl-card-loading {
   text-align: center;
   padding: 16px 0;
-  color: #94a3b8;
+  color: #A08F75;
   font-size: 12px;
 }
 
 .wl-spinner {
   width: 24px;
   height: 24px;
-  border: 3px solid #e2e8f0;
-  border-top-color: #6366f1;
+  border: 3px solid #E8E0D3;
+  border-top-color: #D46A3A;
   border-radius: 50%;
   animation: wl-spin 0.7s linear infinite;
   margin: 0 auto 8px;
@@ -162,16 +177,58 @@
 }
 
 .wl-recipient-badge strong {
-  color: #1e293b;
+  color: #1A1612;
 }
 
 .wl-tag {
   font-size: 10px;
-  font-weight: 500;
-  color: #6366f1;
-  background: #eef2ff;
+  font-weight: 600;
+  color: #B8542A;
+  background: #FDF5F0;
   padding: 2px 8px;
-  border-radius: 10px;
+  border-radius: 999px;
+  border: 1px solid #F6CEB2;
+}
+
+/* ─── Subject section ─────────────────────────────────────────────── */
+.wl-subject-section {
+  margin-bottom: 8px;
+}
+
+.wl-subject-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #5B4F3E;
+  margin-bottom: 4px;
+}
+
+.wl-subject-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.wl-subject-text {
+  flex: 1;
+  font-size: 12px;
+  color: #1A1612;
+}
+
+.wl-btn-use-subject {
+  padding: 3px 10px;
+  background: #FDF5F0;
+  color: #B8542A;
+  border: 1px solid #F6CEB2;
+  border-radius: 8px;
+  font-family: 'WL Inter Tight', -apple-system, sans-serif;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.wl-btn-use-subject:hover {
+  background: #FBE8DC;
 }
 
 /* ─── Rewrite section ─────────────────────────────────────────────── */
@@ -180,13 +237,13 @@
 }
 
 .wl-rewrite-text {
-  background: #faf5ff;
-  border: 1px solid #e9d5ff;
+  background: #FDF5F0;
+  border: 1px solid #F6CEB2;
   border-radius: 8px;
   padding: 10px;
   font-size: 12px;
   line-height: 1.5;
-  color: #1e293b;
+  color: #1A1612;
   max-height: 160px;
   overflow-y: auto;
   white-space: pre-wrap;
@@ -203,40 +260,36 @@
 .wl-btn-use {
   flex: 1;
   padding: 7px 10px;
-  background: #6366f1;
-  color: #fff;
+  background: #D46A3A;
+  color: #FFFDFB;
   border: none;
-  border-radius: 6px;
+  border-radius: 8px;
+  font-family: 'WL Inter Tight', -apple-system, sans-serif;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: background 150ms ease;
+  box-shadow: 0 1px 2px rgba(74, 33, 21, 0.06);
 }
 
 .wl-btn-use:hover {
-  background: #4f46e5;
-}
-
-.wl-btn-use-applied,
-.wl-btn-use-applied:hover {
-  background: #16a34a;
-  cursor: default;
-  opacity: 0.95;
+  background: #B8542A;
 }
 
 .wl-btn-regen {
   padding: 7px 10px;
-  background: #f1f5f9;
-  color: #64748b;
-  border: 1px solid #e2e8f0;
-  border-radius: 6px;
+  background: #FAF6F1;
+  color: #5B4F3E;
+  border: 1px solid #DDD2C0;
+  border-radius: 8px;
+  font-family: 'WL Inter Tight', -apple-system, sans-serif;
   font-size: 12px;
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: background 150ms ease;
 }
 
 .wl-btn-regen:hover {
-  background: #e2e8f0;
+  background: #F2ECE3;
 }
 
 /* ─── Applied confirmation ────────────────────────────────────────── */
@@ -245,14 +298,21 @@
   align-items: center;
   justify-content: center;
   padding: 6px;
-  background: #f0fdf4;
-  border: 1px solid #bbf7d0;
-  border-radius: 6px;
-  color: #16a34a;
+  background: #EDF2E2;
+  border: 1px solid #C4D4A0;
+  border-radius: 8px;
+  color: #5F8A3E;
   font-weight: 600;
   font-size: 12px;
   margin-top: 8px;
   animation: wl-fadeIn 0.2s ease;
+}
+
+.wl-btn-applied {
+  background: #EDF2E2 !important;
+  color: #5F8A3E !important;
+  cursor: default !important;
+  border: 1px solid #C4D4A0 !important;
 }
 
 @keyframes wl-fadeIn {
@@ -263,20 +323,20 @@
 /* ─── Coaching tip ────────────────────────────────────────────────── */
 .wl-tip {
   font-size: 11px;
-  color: #64748b;
+  color: #5B4F3E;
   padding: 8px 0 0;
-  border-top: 1px solid #f1f5f9;
+  border-top: 1px solid #E8E0D3;
   margin-top: 8px;
   line-height: 1.4;
 }
 
 .wl-tip strong {
-  color: #475569;
+  color: #3E352A;
 }
 
 /* ─── Error ───────────────────────────────────────────────────────── */
 .wl-error {
-  color: #dc2626;
+  color: #B8372B;
   font-size: 12px;
   text-align: center;
   padding: 8px 0;
