@@ -29,6 +29,7 @@ let lastRewrite = '';
 let emailCache = new Map();
 let hasToken = false;
 let cachedUserInfo = null;
+let cachedCommStyle = null;
 let applyingRewrite = false;
 let lastEventId = null;
 
@@ -52,6 +53,10 @@ async function fetchUserInfo() {
     const info = await chrome.runtime.sendMessage({ type: 'GET_USER_INFO' });
     if (info && !info.error) {
       cachedUserInfo = info;
+    }
+    const styleInfo = await chrome.runtime.sendMessage({ type: 'GET_MY_STYLE' });
+    if (styleInfo?.commStyle) {
+      cachedCommStyle = styleInfo.commStyle;
     }
   } catch {
     // Non-critical — button will show "W" fallback
@@ -584,7 +589,8 @@ function applyRewrite(rewriteText, container, composeEl, eventId) {
     return `<div>${formatted}</div>`;
   });
 
-  editable.innerHTML = htmlLines.join('');
+  const footerLines = buildWavelengthFooter();
+  editable.innerHTML = htmlLines.join('') + footerLines;
   editable.dispatchEvent(new Event('input', { bubbles: true }));
   lastDraft = rewriteText;
 
@@ -606,6 +612,15 @@ function applyRewrite(rewriteText, container, composeEl, eventId) {
     useBtn.disabled = true;
     useBtn.classList.add('wl-btn-applied');
   }
+}
+
+// ─── Wavelength footer ───────────────────────────────────────────────
+function buildWavelengthFooter() {
+  const styleTag = cachedCommStyle ? ` (${cachedCommStyle} style)` : '';
+  const divider = '<div><br></div>';
+  const footerStyle = 'color:#94a3b8;font-size:11px;font-family:sans-serif;';
+  const line1 = `<div style="${footerStyle}">✦ Written with <a href="https://mywavelength.ai" style="color:#94a3b8;" target="_blank">Wavelength</a>${styleTag}</div>`;
+  return divider + line1;
 }
 
 // ─── Backup auth relay (postMessage from web app → background) ───────

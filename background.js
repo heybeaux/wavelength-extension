@@ -64,6 +64,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
+  if (request.type === 'GET_MY_STYLE') {
+    handleApiCall('/auth/me')
+      .then((user) => sendResponse({ commStyle: user?.profile?.commStyle || null }))
+      .catch(() => sendResponse({ commStyle: null }));
+    return true;
+  }
+
   if (request.type === 'API_CALL') {
     handleApiCall(request.endpoint, request.method, request.body)
       .then(sendResponse)
