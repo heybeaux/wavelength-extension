@@ -618,7 +618,7 @@ function applyRewrite(rewriteText, container, composeEl, eventId) {
 function buildWavelengthFooter() {
   const styleTag = cachedCommStyle ? ` (${cachedCommStyle} style)` : '';
   const divider = '<div><br></div>';
-  const footerStyle = 'color:#94a3b8;font-size:11px;font-family:sans-serif;';
+  const footerStyle = 'color:#64748b;font-size:13px;font-family:sans-serif;';
   const line1 = `<div style="${footerStyle}">✦ Written with <a href="https://mywavelength.ai" style="color:#94a3b8;" target="_blank">Wavelength</a>${styleTag}</div>`;
   return divider + line1;
 }
