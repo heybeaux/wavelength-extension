@@ -29,6 +29,19 @@ document.addEventListener('DOMContentLoaded', async () => {
         return;
       }
 
+      // Validate the token against the API — local JWT decode alone doesn't catch expiry
+      const validation = await chrome.runtime.sendMessage({
+        type: 'API_CALL',
+        endpoint: '/auth/me',
+        method: 'GET',
+      });
+
+      if (validation?.error) {
+        // Token is invalid/expired — AUTH_EXPIRED already cleared it in background.js
+        showSection(loginSection);
+        return;
+      }
+
       const userInfo = await chrome.runtime.sendMessage({ type: 'GET_USER_INFO' });
       if (userInfo?.error) {
         showSection(loginSection);
@@ -60,10 +73,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     showSection(loginSection);
   });
 
-  // Listen for auth success from background script
+  // Listen for auth events from background script
   chrome.runtime.onMessage.addListener((message) => {
     if (message.type === 'AUTH_SUCCESS') {
       checkAuthStatus();
+    }
+    if (message.type === 'AUTH_EXPIRED') {
+      userEmail.textContent = '';
+      userAvatar.textContent = '?';
+      showSection(loginSection);
     }
   });
 

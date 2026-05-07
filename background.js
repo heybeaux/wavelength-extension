@@ -110,7 +110,13 @@ async function handleApiCall(endpoint, method = 'GET', body = null) {
   }
 
   const res = await fetch(`${API_BASE}${endpoint}`, options);
-  if (!res.ok) throw new Error(`API Error: ${res.status}`);
+  if (res.status === 401) {
+    // Token is invalid or expired — clear it and notify all surfaces
+    await clearAuthToken();
+    chrome.runtime.sendMessage({ type: 'AUTH_EXPIRED' }).catch(() => {});
+    throw new Error('Your session has expired. Please sign in again.');
+  }
+  if (!res.ok) throw new Error('Something went wrong. Please try again.');
   return res.json();
 }
 

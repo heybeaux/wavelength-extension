@@ -64,7 +64,7 @@ function getUserInitial() {
   return 'W';
 }
 
-// Re-check auth whenever token changes (e.g. after sign-in)
+// Re-check auth whenever token changes (e.g. after sign-in or expiry)
 chrome.runtime.onMessage.addListener((message) => {
   if (message.type === 'AUTH_SUCCESS' || message.type === 'SET_TOKEN') {
     hasToken = true;
@@ -75,6 +75,15 @@ chrome.runtime.onMessage.addListener((message) => {
         '[role="dialog"] [contenteditable="true"][aria-label], [contenteditable="true"][aria-label="Message Body"]'
       );
       if (editors.length > 0) attachToCompose(editors[0]);
+    }
+  }
+  if (message.type === 'AUTH_EXPIRED') {
+    hasToken = false;
+    if (activeComposeEl) {
+      updateCard(activeComposeEl, {
+        status: 'error',
+        message: 'Your Wavelength session expired. Click the Wavelength icon in your toolbar to sign back in.',
+      });
     }
   }
 });
