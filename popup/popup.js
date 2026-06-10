@@ -7,6 +7,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   const userAvatar = document.getElementById('user-avatar');
   const userEmail = document.getElementById('user-email');
 
+  document.getElementById('version').textContent = `v${chrome.runtime.getManifest().version}`;
+
   function showSection(section) {
     loginSection.style.display = 'none';
     connectedSection.style.display = 'none';
