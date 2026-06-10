@@ -1,18 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Wavelength \u2014 Communication Coach",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Real-time personality-aware coaching for Gmail. Adapt your messages to your recipients' communication style.",
   "permissions": [
-    "storage",
-    "identity"
+    "storage"
   ],
   "host_permissions": [
     "https://mail.google.com/*",
-    "https://outlook.live.com/*",
-    "https://outlook.office.com/*",
-    "https://api-production-dad4.up.railway.app/*",
-    "https://mywavelength.ai/*"
+    "https://api-production-dad4.up.railway.app/*"
   ],
   "content_scripts": [
     {

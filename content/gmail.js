@@ -93,13 +93,6 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 });
 
-// Also listen for postMessage auth (from the extension auth page)
-window.addEventListener('message', (event) => {
-  if (event.data?.type === 'WAVELENGTH_AUTH' && event.data?.token) {
-    chrome.runtime.sendMessage({ type: 'SET_TOKEN', token: event.data.token });
-  }
-});
-
 checkAuth().then(() => {
   observeComposeWindows();
   // Scan immediately in case compose is already open when extension loads
