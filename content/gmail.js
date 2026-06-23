@@ -467,6 +467,14 @@ async function analyzeCurrentDraft() {
 
   updateCard(activeComposeEl, { status: 'analyzing' });
 
+  if (recipientEmails.length > 1) {
+    updateCard(activeComposeEl, {
+      status: 'error',
+      message: `Wavelength currently coaches one recipient at a time. Remove ${recipientEmails.length - 1} recipient${recipientEmails.length === 2 ? '' : 's'} or open a separate draft.`,
+    });
+    return;
+  }
+
   const recipientIds = await resolveEmails(recipientEmails);
 
   if (recipientIds.length === 0) {
@@ -524,7 +532,7 @@ function extractRecipientEmails(dialog) {
 // ─── Email → userId resolution ───────────────────────────────────────
 async function resolveEmails(emails) {
   const ids = [];
-  for (const email of emails.slice(0, 5)) {
+  for (const email of emails.slice(0, 1)) {
     try {
       if (emailCache.has(email)) {
         const cachedId = emailCache.get(email);
@@ -618,8 +626,9 @@ function buildWavelengthFooter() {
 
 // ─── Backup auth relay (postMessage from web app → background) ───────
 window.addEventListener('message', (event) => {
-  if (event.origin !== 'https://mywavelength.ai') return;
-  if (event.data?.type === 'WAVELENGTH_AUTH' && event.data.token) {
+  if (event.origin !== APP_URL) return;
+  if (event.source !== window) return;
+  if (event.data?.type === 'WAVELENGTH_AUTH' && typeof event.data.token === 'string') {
     chrome.runtime.sendMessage({ type: 'SET_TOKEN', token: event.data.token });
   }
 });

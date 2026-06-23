@@ -6,6 +6,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const signOutBtn = document.getElementById('sign-out-btn');
   const userAvatar = document.getElementById('user-avatar');
   const userEmail = document.getElementById('user-email');
+  let authWindow = null;
 
   document.getElementById('version').textContent = `v${chrome.runtime.getManifest().version}`;
 
@@ -60,7 +61,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Sign In — open the web app's extension auth page via window.open
   // so that window.opener is set and postMessage works back to this popup
   signInBtn.addEventListener('click', () => {
-    window.open(
+    authWindow = window.open(
       'https://mywavelength.ai/auth/extension',
       '_blank',
       'width=500,height=600'
@@ -87,10 +88,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Listen for postMessage from the auth tab (window.opener channel)
+  // Listen for postMessage from the auth tab (window.opener channel).
+  // Only accept tokens from the production Wavelength origin to avoid
+  // token-substitution/session-fixation from arbitrary pages.
   window.addEventListener('message', (event) => {
-    if (event.data?.type === 'WAVELENGTH_AUTH' && event.data?.token) {
+    if (event.origin !== 'https://mywavelength.ai') return;
+    if (!authWindow || event.source !== authWindow) return;
+    if (event.data?.type === 'WAVELENGTH_AUTH' && typeof event.data?.token === 'string') {
       chrome.runtime.sendMessage({ type: 'SET_TOKEN', token: event.data.token }, () => {
+        authWindow = null;
         checkAuthStatus();
       });
     }

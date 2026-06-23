@@ -2,6 +2,25 @@
 // Manages auth token storage and proxies API calls for content scripts
 
 const API_BASE = 'https://api-production-dad4.up.railway.app/api/v1';
+const TRUSTED_WEB_ORIGIN = 'https://mywavelength.ai';
+
+function senderOrigin(sender) {
+  if (sender.origin) return sender.origin;
+  if (sender.url) {
+    try { return new URL(sender.url).origin; } catch { return null; }
+  }
+  return null;
+}
+
+function isTrustedWebSender(sender) {
+  return senderOrigin(sender) === TRUSTED_WEB_ORIGIN;
+}
+
+function isExtensionSender(sender) {
+  if (sender.id !== chrome.runtime.id) return false;
+  const origin = senderOrigin(sender);
+  return !origin || origin.startsWith('chrome-extension://');
+}
 
 // Store/retrieve auth token
 async function getAuthToken() {
@@ -19,7 +38,12 @@ async function clearAuthToken() {
 
 // Handle auth tokens from the web app (externally_connectable)
 chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
-  if (message.type === 'WAVELENGTH_AUTH' && message.token) {
+  if (!isTrustedWebSender(sender)) {
+    sendResponse({ success: false, error: 'Untrusted sender' });
+    return false;
+  }
+
+  if (message.type === 'WAVELENGTH_AUTH' && typeof message.token === 'string') {
     setAuthToken(message.token).then(() => {
       sendResponse({ success: true });
       // Notify any open popups / content scripts
@@ -37,6 +61,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.type === 'SET_TOKEN') {
+    if (!isExtensionSender(sender) && !isTrustedWebSender(sender)) {
+      sendResponse({ success: false, error: 'Untrusted sender' });
+      return false;
+    }
+    if (typeof request.token !== 'string' || request.token.length < 20) {
+      sendResponse({ success: false, error: 'Invalid token' });
+      return false;
+    }
     setAuthToken(request.token).then(() => sendResponse({ success: true }));
     return true;
   }
