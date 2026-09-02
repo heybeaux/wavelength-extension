@@ -95,7 +95,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (event.origin !== 'https://mywavelength.ai') return;
     if (!authWindow || event.source !== authWindow) return;
     if (event.data?.type === 'WAVELENGTH_AUTH' && typeof event.data?.token === 'string') {
-      chrome.runtime.sendMessage({ type: 'SET_TOKEN', token: event.data.token }, () => {
+      chrome.runtime.sendMessage({
+        type: 'SET_TOKEN',
+        token: event.data.token,
+        refresh_token: event.data.refresh_token,
+        expires_at: event.data.expires_at,
+      }, () => {
         authWindow = null;
         checkAuthStatus();
       });

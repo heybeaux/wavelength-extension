@@ -8,9 +8,8 @@
 
 /* ─── Floating button ─────────────────────────────────────────────── */
 .wl-btn {
-  position: absolute;
-  bottom: 8px;
-  right: 48px;
+  position: fixed;
+  /* top/left assigned in gmail.js against the visible compose */
   width: 32px;
   height: 32px;
   border-radius: 50%;
@@ -62,10 +61,13 @@
 }
 
 /* ─── Floating card ───────────────────────────────────────────────── */
+/* position:fixed on document.body — pixel top/left set by positionCoachingCard.
+   Do not restore host-relative bottom/right or .wl-card-below percentages; those
+   pin to the viewport under fixed and break the new-compose dialog (WL-050). */
 .wl-card {
-  position: absolute;
-  bottom: 48px;
-  right: 8px;
+  position: fixed;
+  top: 0;
+  left: 0;
   width: 300px;
   max-height: 380px;
   background: #FFFDFB;
@@ -101,7 +103,18 @@
   font-size: 14px;
   color: #1A1612;
   flex: 1;
+  min-width: 0;
   letter-spacing: -0.02em;
+}
+
+.wl-card-title--name {
+  font-family: 'WL Inter Tight', -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: normal;   /* .wl-card-title sets -0.02em for the display face */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .wl-card-close {
@@ -112,6 +125,7 @@
   cursor: pointer;
   padding: 0 4px;
   line-height: 1;
+  flex-shrink: 0;
   transition: color 120ms ease;
 }
 
@@ -119,10 +133,36 @@
   color: #5B4F3E;
 }
 
+/* One scroll region only — the rewrite box. Body must not also scroll
+   (that was the dual-scrollbar bug in the live card). Matches the artifact:
+   rewrite scrolls; actions / tip stay put. */
 .wl-card-body {
   padding: 12px;
-  overflow-y: auto;
+  overflow: hidden;
   max-height: 320px;
+}
+
+.wl-rewrite-text {
+  scrollbar-width: thin;
+  scrollbar-color: #DDD2C0 transparent;
+}
+
+.wl-rewrite-text::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.wl-rewrite-text::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.wl-rewrite-text::-webkit-scrollbar-thumb {
+  background: #DDD2C0;
+  border-radius: 999px;
+}
+
+.wl-rewrite-text::-webkit-scrollbar-thumb:hover {
+  background: #C9BCA6;
 }
 
 /* ─── Card content states ─────────────────────────────────────────── */
@@ -143,6 +183,30 @@
 }
 
 .wl-hint a:hover {
+  color: #D46A3A;
+}
+
+.wl-invite-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 10px;
+  padding: 7px 14px;
+  background: #FAF6F1;
+  color: #B8542A;
+  border: 1px solid #DDD2C0;
+  border-radius: 8px;
+  font-family: 'WL Inter Tight', -apple-system, sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.wl-invite-btn:hover {
+  background: #F2ECE3;
+  border-color: #D0C4B0;
   color: #D46A3A;
 }
 
@@ -167,19 +231,7 @@
   to { transform: rotate(360deg); }
 }
 
-/* ─── Recipient badge ─────────────────────────────────────────────── */
-.wl-recipient-badge {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
-  font-size: 12px;
-}
-
-.wl-recipient-badge strong {
-  color: #1A1612;
-}
-
+/* ─── Style tag (header) ──────────────────────────────────────────── */
 .wl-tag {
   font-size: 10px;
   font-weight: 600;
@@ -188,47 +240,60 @@
   padding: 2px 8px;
   border-radius: 999px;
   border: 1px solid #F6CEB2;
+  flex-shrink: 0;
 }
 
-/* ─── Subject section ─────────────────────────────────────────────── */
-.wl-subject-section {
-  margin-bottom: 8px;
-}
-
-.wl-subject-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: #5B4F3E;
-  margin-bottom: 4px;
-}
-
+/* ─── Subject row — inline ────────────────────────────────────────── */
 .wl-subject-row {
   display: flex;
   align-items: center;
   gap: 6px;
+  margin-bottom: 9px;
+}
+
+.wl-subject-label {
+  color: #A08F75;
+  font-size: 11px;
+  font-weight: 500;
+  flex-shrink: 0;
 }
 
 .wl-subject-text {
   flex: 1;
+  min-width: 0;
   font-size: 12px;
   color: #1A1612;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.wl-btn-use-subject {
-  padding: 3px 10px;
-  background: #FDF5F0;
-  color: #B8542A;
-  border: 1px solid #F6CEB2;
-  border-radius: 8px;
+.wl-btn-subject {
+  padding: 4px 11px;
+  background: #D46A3A;
+  color: #FFFDFB;
+  border: none;
+  border-radius: 7px;
+  flex-shrink: 0;
+  cursor: pointer;
   font-family: 'WL Inter Tight', -apple-system, sans-serif;
   font-size: 11px;
   font-weight: 600;
-  cursor: pointer;
-  transition: background 120ms ease;
 }
 
-.wl-btn-use-subject:hover {
-  background: #FBE8DC;
+.wl-btn-subject:hover {
+  background: #B8542A;
+}
+
+.wl-btn-subject[disabled] {
+  background: #F0EBE4;
+  color: #A08F75;
+  border: 1px solid #E2D9CC;
+  cursor: not-allowed;
+}
+
+.wl-btn-subject[disabled]:hover {
+  background: #F0EBE4;
 }
 
 /* ─── Rewrite section ─────────────────────────────────────────────── */
@@ -244,10 +309,33 @@
   font-size: 12px;
   line-height: 1.5;
   color: #1A1612;
-  max-height: 160px;
+  /* Artifact: rewrite is the only scroll region; keep actions/tip visible. */
+  max-height: 118px;
   overflow-y: auto;
   white-space: pre-wrap;
   word-wrap: break-word;
+}
+
+.wl-footer-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 6px 0;
+  cursor: pointer;
+  font-family: 'WL Inter Tight', -apple-system, sans-serif;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #5B4F3E;
+}
+
+.wl-footer-opt input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  flex-shrink: 0;
+  cursor: pointer;
+  accent-color: #D46A3A;
 }
 
 /* ─── Action buttons ──────────────────────────────────────────────── */
@@ -255,9 +343,11 @@
   display: flex;
   gap: 6px;
   margin-top: 8px;
+  align-items: center;
 }
 
 .wl-btn-use {
+  position: relative;
   flex: 1;
   padding: 7px 10px;
   background: #D46A3A;
@@ -276,43 +366,190 @@
   background: #B8542A;
 }
 
-.wl-btn-regen {
-  padding: 7px 10px;
-  background: #FAF6F1;
-  color: #5B4F3E;
-  border: 1px solid #DDD2C0;
+.wl-btn-use:disabled,
+.wl-btn-use.wl-btn-refused {
+  background: #F0EBE4;
+  color: #A08F75;
+  border: 1px solid #E2D9CC;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.wl-btn-use:disabled:hover,
+.wl-btn-use.wl-btn-refused:hover {
+  background: #F0EBE4;
+}
+
+.wl-btn-use[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 7px);
+  left: 0;
+  background: #2B2018;
+  color: #FFFDFB;
+  font-family: 'WL Inter Tight', -apple-system, sans-serif;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 8px;
+  border-radius: 6px;
+  white-space: normal;
+  max-width: 240px;
+  text-align: left;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 110ms ease;
+  z-index: 5;
+}
+
+.wl-btn-use[data-tip]:hover::after,
+.wl-btn-use[data-tip]:focus-visible::after {
+  opacity: 1;
+}
+
+/* Applied pill — occupies the primary flex slot; not a button */
+.wl-done {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 6px 6px 10px;
+  background: #F2F7F3;
+  border: 1px solid #CFE3D6;
   border-radius: 8px;
   font-family: 'WL Inter Tight', -apple-system, sans-serif;
   font-size: 12px;
-  cursor: pointer;
-  transition: background 150ms ease;
-}
-
-.wl-btn-regen:hover {
-  background: #F2ECE3;
-}
-
-/* ─── Applied confirmation ────────────────────────────────────────── */
-.wl-applied {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 6px;
-  background: #EDF2E2;
-  border: 1px solid #C4D4A0;
-  border-radius: 8px;
-  color: #5F8A3E;
   font-weight: 600;
-  font-size: 12px;
-  margin-top: 8px;
-  animation: wl-fadeIn 0.2s ease;
+  color: #2A5F45;
 }
 
-.wl-btn-applied {
-  background: #EDF2E2 !important;
-  color: #5F8A3E !important;
-  cursor: default !important;
-  border: 1px solid #C4D4A0 !important;
+.wl-done-tick {
+  color: #2E7D5B;
+  flex-shrink: 0;
+}
+
+/* 32px icon buttons — Regenerate + Undo */
+.wl-btn-icon {
+  position: relative;
+  box-sizing: border-box;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  background: #FFFDFB;
+  color: #5B4F3E;
+  border: 1px solid #DDD2C0;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.wl-btn-icon:hover {
+  background: #FAF6F1;
+  border-color: #C9BCA6;
+  color: #1A1612;
+}
+
+.wl-btn-icon:focus-visible {
+  outline: 2px solid #D46A3A;
+  outline-offset: 2px;
+}
+
+.wl-btn-icon[disabled] {
+  color: #C9BCA6;
+  cursor: not-allowed;
+}
+
+.wl-btn-icon svg {
+  width: 15px;
+  height: 15px;
+  display: block;
+}
+
+/* Tooltip — hover AND focus (not title) */
+.wl-btn-icon::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 7px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: #2B2018;
+  color: #FFFDFB;
+  font-family: 'WL Inter Tight', -apple-system, sans-serif;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 110ms ease;
+  z-index: 5;
+}
+
+.wl-btn-icon::before {
+  content: '';
+  position: absolute;
+  bottom: calc(100% + -1px);
+  left: 50%;
+  transform: translateX(-50%);
+  border: 4px solid transparent;
+  border-top-color: #2B2018;
+  opacity: 0;
+  transition: opacity 110ms ease;
+  pointer-events: none;
+}
+
+.wl-btn-icon:hover::after,
+.wl-btn-icon:hover::before,
+.wl-btn-icon:focus-visible::after,
+.wl-btn-icon:focus-visible::before {
+  opacity: 1;
+}
+
+.wl-btn-icon[disabled]::after,
+.wl-btn-icon[disabled]::before {
+  display: none;
+}
+
+/* Action-row icons sit near the card edge — anchor right so centred
+   tips are not clipped by .wl-card / .wl-card-body overflow:hidden. */
+.wl-actions .wl-btn-icon::after {
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
+.wl-actions .wl-btn-icon::before {
+  left: auto;
+  right: 12px; /* 32px icon, 8px arrow box → centre under icon */
+  transform: none;
+}
+
+/* Warning / refusal panel */
+.wl-reason {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 9px 10px;
+  background: #FDF8F2;
+  border: 1px solid #EFE0CB;
+  border-radius: 8px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: #5B4F3E;
+}
+
+.wl-reason-ico {
+  color: #A8641B;
+  flex-shrink: 0;
+  line-height: 1.3;
+}
+
+.wl-refuse-reason,
+.wl-undo-refuse-reason {
+  margin-top: 10px;
 }
 
 @keyframes wl-fadeIn {
@@ -334,10 +571,22 @@
   color: #3E352A;
 }
 
-/* ─── Error ───────────────────────────────────────────────────────── */
+/* ─── Legacy error class (kept for any residual callers) ───────────── */
 .wl-error {
   color: #B8372B;
   font-size: 12px;
   text-align: center;
   padding: 8px 0;
+}
+
+.wl-warning {
+  margin: 0;
+  padding: 10px 12px;
+  background: #FDF8F2;
+  border: 1px solid #EFE0CB;
+  border-radius: 8px;
+  color: #5B4F3E;
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: left;
 }
