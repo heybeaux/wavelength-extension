@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Wavelength \u2014 Communication Coach",
-  "version": "0.2.32",
+  "version": "0.2.33",
   "description": "Real-time personality-aware coaching for Gmail. Adapt your messages to your recipients' communication style.",
   "permissions": [
     "storage"

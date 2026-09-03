@@ -16,6 +16,7 @@
     corroboratedSignature: false,
     corroboratedQuote: false,
     clearedSignature: false,
+    imageOnlySignature: false,
   };
 
   function isElement(node) {
@@ -261,6 +262,7 @@
     var corroboratedSignature = false;
     var corroboratedQuote = false;
     var clearedSignature = false;
+    var imageOnlySignature = false;
     var marker = null;
 
     var walker = document.createTreeWalker(editable, NodeFilter.SHOW_ELEMENT, {
@@ -281,6 +283,9 @@
           if (!marker) marker = el;
         } else if (isClearedSignature(el)) {
           clearedSignature = true;
+        } else {
+          // Empty text, but an img (or similar) is still there to protect.
+          imageOnlySignature = true;
         }
       }
       el = walker.nextNode();
@@ -294,6 +299,7 @@
         corroboratedSignature: false,
         corroboratedQuote: false,
         clearedSignature: clearedSignature,
+        imageOnlySignature: imageOnlySignature,
       };
     }
 
@@ -307,6 +313,7 @@
       corroboratedSignature: corroboratedSignature,
       corroboratedQuote: corroboratedQuote,
       clearedSignature: clearedSignature,
+      imageOnlySignature: imageOnlySignature,
     };
   }
 
@@ -387,7 +394,14 @@
     // User deleted their signature in-compose. Gmail left an empty marker.
     // Whole-box write cannot destroy a signature that is already gone.
     if (zones.clearedSignature) return false;
-    return !gmailIsHoldingTrimmedContent(editable);
+    // Image-only signature: empty text so it does not corroborate, but the
+    // img is still Gmail's to keep. A whole-box write would destroy it.
+    if (zones.imageOnlySignature) return true;
+    // No signature marker, no quote. The box is the message — including a
+    // draft reopened after the user deleted their signature (Gmail drops the
+    // empty node on save). Unmarked plain-text signatures are the residual
+    // risk; Use this is allowed because blocking it is worse for the common case.
+    return false;
   }
 
   function htmlToFragment(doc, html) {
