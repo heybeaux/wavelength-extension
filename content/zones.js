@@ -413,7 +413,44 @@
   }
 
   /**
-   * Replace zone 1 only; optionally insert footer HTML before insertPoint.
+   * Insert the Wavelength footer (zone 4).
+   * With a corroborated boundary: before insertPoint (above signature/quote).
+   * With none: append. After 0.2.33 the no-boundary write is allowed, so the
+   * footer belongs at the end of the message-only box. If Gmail later
+   * reattaches a held signature, that block lands below this.
+   * Idempotent: an existing mywavelength.ai link outside a quote is left alone.
+   */
+  function hasWavelengthFooter(editable) {
+    if (!isElement(editable) || !editable.querySelectorAll) return false;
+    var links = editable.querySelectorAll('a[href]');
+    for (var i = 0; i < links.length; i++) {
+      var href = links[i].getAttribute('href') || '';
+      if (href.indexOf('mywavelength.ai') === -1) continue;
+      if (insideGmailQuote(links[i])) continue;
+      return true;
+    }
+    return false;
+  }
+
+  function insertZone4Footer(editable, footerHtml) {
+    if (!isElement(editable) || !footerHtml) return { ok: false, reason: 'no-editable' };
+    if (hasWavelengthFooter(editable)) return { ok: true, reason: 'already' };
+
+    var zones = resolveZones(editable);
+    var frag = htmlToFragment(editable.ownerDocument, footerHtml);
+    var hasBoundary =
+      !!zones.corroboratedSignature || !!zones.corroboratedQuote;
+    if (hasBoundary && zones.insertPoint && zones.insertPoint.parentNode) {
+      zones.insertPoint.parentNode.insertBefore(frag, zones.insertPoint);
+    } else {
+      editable.appendChild(frag);
+    }
+    return { ok: true };
+  }
+
+  /**
+   * Replace zone 1 only; optionally insert footer HTML before insertPoint
+   * (or at the end when there is no boundary).
    * Caller must refuse first via shouldRefuseUseRewrite. Mutates editable.
    * Returns { ok: true } or { ok: false, reason: 'refused'|'no-zone1' }.
    */
@@ -426,7 +463,6 @@
     }
 
     var doc = editable.ownerDocument;
-    var insertPoint = zones.insertPoint;
     var range = zones.zone1;
 
     range.deleteContents();
@@ -435,19 +471,7 @@
     }
 
     if (footerHtml) {
-      var hasBoundary =
-        !!zones.corroboratedSignature || !!zones.corroboratedQuote;
-      // No-boundary (whole-box) path: insertPoint is null and append would
-      // land at the end of the editable. Where that sits relative to the
-      // signature after expand is unmeasured — skip rather than guess.
-      if (hasBoundary) {
-        var footerFrag = htmlToFragment(doc, footerHtml);
-        if (insertPoint && insertPoint.parentNode) {
-          insertPoint.parentNode.insertBefore(footerFrag, insertPoint);
-        } else {
-          editable.appendChild(footerFrag);
-        }
-      }
+      insertZone4Footer(editable, footerHtml);
     }
 
     return { ok: true };
@@ -679,6 +703,7 @@
   root.resolveZones = resolveZones;
   root.shouldRefuseUseRewrite = shouldRefuseUseRewrite;
   root.replaceZone1Content = replaceZone1Content;
+  root.insertZone4Footer = insertZone4Footer;
   root.extractZone1Draft = extractZone1Draft;
   root.serializeZone1Html = serializeZone1Html;
   root.restoreZone1Html = restoreZone1Html;
@@ -690,6 +715,7 @@
       resolveZones: resolveZones,
       shouldRefuseUseRewrite: shouldRefuseUseRewrite,
       replaceZone1Content: replaceZone1Content,
+      insertZone4Footer: insertZone4Footer,
       extractZone1Draft: extractZone1Draft,
       serializeZone1Html: serializeZone1Html,
       restoreZone1Html: restoreZone1Html,

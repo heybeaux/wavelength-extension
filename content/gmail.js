@@ -1,5 +1,14 @@
 // Wavelength Gmail Content Script — Grammarly-style floating button + card
 // Small circular button in compose window, floating card with suggestions
+//
+// Runs as a content script in Gmail, and is also `require`d by the Jest suite
+// so the card's real behaviour can be asserted rather than reimplemented.
+// IN_EXTENSION gates every top-level side effect — listener registration and
+// the startup scan — so requiring this file in jsdom defines the functions and
+// starts nothing. It is true in any real browser context, so the shipped
+// behaviour is unchanged. See the CommonJS export at the end of the file.
+const IN_EXTENSION =
+  typeof chrome !== 'undefined' && !!chrome.runtime && !!chrome.runtime.id;
 
 const DEBOUNCE_MS = 1500;
 const RECIPIENT_POLL_MS = 100;
@@ -16,6 +25,7 @@ const BTN_RIGHT_PAD_PX = 48;
 
 // ─── Font injection (MV3-safe) ──────────────────────────────────────
 (function injectFonts() {
+  if (!IN_EXTENSION) return; // chrome.runtime.getURL is unavailable under Jest
   const fonts = [
     { family: 'WL Inter Tight', weight: '400', file: 'fonts/InterTight-Regular.ttf' },
     { family: 'WL Inter Tight', weight: '500', file: 'fonts/InterTight-Medium.ttf' },
@@ -96,7 +106,7 @@ function getUserInitial() {
 }
 
 // Re-check auth whenever token changes (e.g. after sign-in or expiry)
-chrome.runtime.onMessage.addListener((message) => {
+if (IN_EXTENSION) chrome.runtime.onMessage.addListener((message) => {
   if (message.type === 'AUTH_SUCCESS' || message.type === 'SET_TOKEN') {
     hasToken = true;
     fetchUserInfo();
@@ -119,7 +129,7 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 });
 
-checkAuth().then(() => {
+if (IN_EXTENSION) checkAuth().then(() => {
   observeComposeWindows();
   // Scan immediately in case compose is already open when extension loads
   const editors = document.querySelectorAll(
@@ -1051,6 +1061,7 @@ function updateCard(composeEl, data) {
   switch (data.status) {
     case 'analyzing':
       setBtnLoading(composeEl);
+      rememberFooterOpt(composeEl, body);
       // Artifact state 10: keep recipient in the header when already known (e.g. regenerate).
       setCardHeader(card, composeEl._wlLastResult?.recipient_summary || null);
       body.innerHTML = `
@@ -1172,7 +1183,7 @@ function renderResult(container, result, recipientEmails, composeEl) {
           </button>
         </div>
         <label class="wl-footer-opt">
-          <input type="checkbox" data-action="footer-opt">
+          <input type="checkbox" data-action="footer-opt"${composeEl._wlWantFooter ? ' checked' : ''}>
           <span>Written with Wavelength</span>
         </label>
       </div>
@@ -1209,6 +1220,13 @@ function renderResult(container, result, recipientEmails, composeEl) {
   const useBtn = container.querySelector('[data-action="use"]');
   if (useBtn) {
     useBtn.addEventListener('click', container._wlOnUse);
+  }
+
+  const footerOpt = container.querySelector('[data-action="footer-opt"]');
+  if (footerOpt) {
+    footerOpt.addEventListener('change', () => {
+      onFooterOptChange(container, composeEl, footerOpt.checked === true);
+    });
   }
 
   // Wire up "Regenerate" — does not push; wakes primary on next result.
@@ -1469,11 +1487,49 @@ function showRewriteRefusal(container) {
   }
 }
 
+function rememberFooterOpt(composeEl, container) {
+  const box = container?.querySelector('[data-action="footer-opt"]');
+  if (!composeEl || !box) return;
+  composeEl._wlWantFooter = box.checked === true;
+}
+
+function onFooterOptChange(container, composeEl, checked) {
+  if (composeEl) composeEl._wlWantFooter = !!checked;
+
+  // Pre-apply: checkbox state is read by applyRewrite. Nothing to write yet.
+  if (!container?.querySelector('.wl-done')) return;
+
+  const editable = getComposeEditable(composeEl);
+  if (!editable) return;
+
+  applyingRewrite = true;
+  clearTimeout(debounceTimer);
+  try {
+    if (checked) {
+      insertZone4Footer(editable, buildWavelengthFooter());
+    } else {
+      stripWavelengthFooters(editable);
+    }
+    editable.dispatchEvent(new Event('input', { bubbles: true }));
+    lastDraft = extractZone1Draft(editable);
+
+    const stack = composeEl._wlUndoStack;
+    if (stack && stack.length > 0) {
+      stack[stack.length - 1].hadFooter = !!checked;
+    }
+  } finally {
+    setTimeout(() => {
+      applyingRewrite = false;
+    }, 500);
+  }
+}
+
 function applyRewrite(rewriteText, container, composeEl, eventId) {
   if (!composeEl || !rewriteText) return;
 
   const includeFooter =
     container.querySelector('[data-action="footer-opt"]')?.checked === true;
+  if (composeEl) composeEl._wlWantFooter = includeFooter;
 
   // Record suggestion acceptance and re-score in the backend
   const acceptEventId = eventId || lastEventId;
@@ -1551,7 +1607,7 @@ function buildWavelengthFooter() {
 }
 
 // ─── Backup auth relay (postMessage from web app → background) ───────
-window.addEventListener('message', (event) => {
+if (IN_EXTENSION) window.addEventListener('message', (event) => {
   if (event.origin !== APP_URL) return;
   if (event.source !== window) return;
   if (event.data?.type === 'WAVELENGTH_AUTH' && typeof event.data.token === 'string') {
@@ -1565,7 +1621,7 @@ window.addEventListener('message', (event) => {
 });
 
 // Listen for auth success from background to re-check auth state
-chrome.runtime.onMessage.addListener((message) => {
+if (IN_EXTENSION) chrome.runtime.onMessage.addListener((message) => {
   if (message.type === 'AUTH_SUCCESS') {
     hasToken = true;
   }
@@ -1601,4 +1657,22 @@ function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str;
   return div.innerHTML;
+}
+
+// ─── CommonJS export (tests only) ────────────────────────────────────
+// Mirrors the pattern in zones.js. Chrome ignores this: a content script has
+// no `module`, so the guard is false and nothing here runs in the browser.
+//
+// This exists so the Jest suite can assert what gmail.js actually does instead
+// of hand-copying its logic into the test file. card-dismiss.spec.js documents
+// why that mattered: a reimplementation "will not fail if gmail.js changes or
+// regresses", and three footer defects shipped past the suite for exactly that
+// reason. Export what a test needs to drive real behaviour, nothing more.
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    renderResult,
+    rememberFooterOpt,
+    buildWavelengthFooter,
+    escapeHtml,
+  };
 }
