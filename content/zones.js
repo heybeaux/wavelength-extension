@@ -17,6 +17,7 @@
     corroboratedQuote: false,
     clearedSignature: false,
     imageOnlySignature: false,
+    signatureFollowsZone1: false,
   };
 
   function isElement(node) {
@@ -263,6 +264,11 @@
     var corroboratedQuote = false;
     var clearedSignature = false;
     var imageOnlySignature = false;
+    // A real signature met before any quote sits directly under zone 1 on
+    // send. One placed after the quoted thread lands below the thread, where
+    // the reader's client collapses it, so it does not count here. Sent to the
+    // coach as has_signature so the rewrite stops adding its own closing.
+    var signatureFollowsZone1 = false;
     var marker = null;
 
     var walker = document.createTreeWalker(editable, NodeFilter.SHOW_ELEMENT, {
@@ -280,12 +286,14 @@
       } else if (isSignatureMarker(el) && !insideGmailQuote(el)) {
         if (isNonEmptySignature(el)) {
           corroboratedSignature = true;
+          if (!corroboratedQuote) signatureFollowsZone1 = true;
           if (!marker) marker = el;
         } else if (isClearedSignature(el)) {
           clearedSignature = true;
         } else {
           // Empty text, but an img (or similar) is still there to protect.
           imageOnlySignature = true;
+          if (!corroboratedQuote) signatureFollowsZone1 = true;
         }
       }
       el = walker.nextNode();
@@ -300,6 +308,7 @@
         corroboratedQuote: false,
         clearedSignature: clearedSignature,
         imageOnlySignature: imageOnlySignature,
+        signatureFollowsZone1: signatureFollowsZone1,
       };
     }
 
@@ -314,6 +323,7 @@
       corroboratedQuote: corroboratedQuote,
       clearedSignature: clearedSignature,
       imageOnlySignature: imageOnlySignature,
+      signatureFollowsZone1: signatureFollowsZone1,
     };
   }
 

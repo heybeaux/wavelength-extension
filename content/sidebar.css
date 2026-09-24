@@ -6,10 +6,37 @@
 /* Font families: 'WL Inter Tight' (body), 'WL Fraunces' (display)
    These @font-face rules are injected at runtime — see gmail.js injectFonts() */
 
-/* ─── Floating button ─────────────────────────────────────────────── */
-.wl-btn {
+/* ─── Button ──────────────────────────────────────────────────────── */
+/* One button per compose. .wl-btn-wrap is a 44px box (button + badge) that is
+   absolutely positioned inside Gmail's Send row (.aDh) and resolves against
+   .aDj, the row's own positioned wrapper on both surfaces — so it rides the
+   row wherever Gmail puts it, pinned or not, with no measuring. --body is the
+   fallback when no row exists: fixed, top/left set in gmail.js against the
+   visible compose (the Option B clamp). */
+.wl-btn-wrap {
+  position: absolute;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 9999;
+}
+
+.wl-btn-wrap--row {
+  bottom: 2px;  /* 32px button at bottom:8px / right:48px of the row */
+  right: 42px;
+}
+
+.wl-btn-wrap--body {
   position: fixed;
-  /* top/left assigned in gmail.js against the visible compose */
+  top: -9999px;
+  left: 0;
+}
+
+.wl-btn {
+  position: relative;
   width: 32px;
   height: 32px;
   border-radius: 50%;
@@ -23,21 +50,25 @@
   align-items: center;
   justify-content: center;
   box-shadow: 0 2px 8px rgba(212, 106, 58, 0.35);
-  z-index: 9999;
-  transition: transform 200ms cubic-bezier(0.2, 0.7, 0.2, 1),
-              box-shadow 200ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  pointer-events: auto;
+  transition: box-shadow 200ms cubic-bezier(0.2, 0.7, 0.2, 1);
   line-height: 1;
   padding: 0;
   font-family: 'WL Inter Tight', -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
 }
 
 .wl-btn:hover {
-  transform: scale(1.1);
   box-shadow: 0 4px 16px rgba(212, 106, 58, 0.45);
 }
 
+.wl-btn:focus-visible {
+  outline: 2px solid #D46A3A;
+  outline-offset: 2px;
+}
+
+/* A rewrite is waiting (the badge says so too). */
 .wl-btn.wl-ready {
-  animation: wl-pulse 2s infinite;
+  box-shadow: 0 4px 16px rgba(212, 106, 58, 0.45);
 }
 
 .wl-btn.wl-loading {
@@ -45,9 +76,12 @@
   opacity: 0.8;
 }
 
-@keyframes wl-pulse {
-  0%, 100% { box-shadow: 0 2px 8px rgba(212, 106, 58, 0.35); }
-  50% { box-shadow: 0 2px 16px rgba(212, 106, 58, 0.65); }
+/* Not the focused compose: keeps its state, goes quiet. */
+.wl-btn.wl-quiet {
+  background: #FFFDFB;
+  color: #D46A3A;
+  border: 1px solid #DDD2C0;
+  box-shadow: 0 1px 3px rgba(74, 33, 21, 0.10);
 }
 
 /* Tiny spinner inside button */
@@ -58,6 +92,95 @@
   border-top-color: #FFFDFB;
   border-radius: 50%;
   animation: wl-spin 0.7s linear infinite;
+}
+
+.wl-btn.wl-quiet .wl-btn-spinner {
+  border-color: #E8E0D3;
+  border-top-color: #D46A3A;
+}
+
+/* Badge: a sibling of the button, so state redraws never wipe it.
+   Ready = count on terracotta; attention = "!" on cream with an amber ring
+   (a different shape, not colour alone). */
+.wl-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border-radius: 8px;
+  font-family: 'WL Inter Tight', -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 12px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.wl-badge[hidden] {
+  display: none;
+}
+
+.wl-badge--ready {
+  background: #B8372B;
+  color: #FFFDFB;
+  border: 2px solid #FFFDFB;
+}
+
+.wl-badge--attention {
+  width: 16px;
+  padding: 0;
+  background: #FAF6F1;
+  color: #A8641B;
+  border: 2px solid #A8641B;
+  font-size: 11px;
+}
+
+/* Tooltip — hover AND focus (not title). Right-anchored: a centred tip is
+   clipped by the dialog 48px from its edge. Hidden while the card is open. */
+.wl-btn[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 9px);
+  right: 0;
+  background: #2B2018;
+  color: #FFFDFB;
+  font-family: 'WL Inter Tight', -apple-system, sans-serif;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 110ms ease;
+  z-index: 5;
+}
+
+.wl-btn[data-tip]::before {
+  content: '';
+  position: absolute;
+  bottom: calc(100% + 1px);
+  right: 12px;
+  border: 4px solid transparent;
+  border-top-color: #2B2018;
+  opacity: 0;
+  transition: opacity 110ms ease;
+  pointer-events: none;
+}
+
+.wl-btn[data-tip]:hover::after,
+.wl-btn[data-tip]:hover::before,
+.wl-btn[data-tip]:focus-visible::after,
+.wl-btn[data-tip]:focus-visible::before {
+  opacity: 1;
+}
+
+.wl-btn[aria-expanded="true"]::after,
+.wl-btn[aria-expanded="true"]::before {
+  display: none;
 }
 
 /* ─── Floating card ───────────────────────────────────────────────── */
@@ -143,6 +266,7 @@
 }
 
 .wl-rewrite-text {
+  overscroll-behavior: contain; /* reaching the end never scrolls the page under the card */
   scrollbar-width: thin;
   scrollbar-color: #DDD2C0 transparent;
 }
@@ -555,6 +679,13 @@
 @keyframes wl-fadeIn {
   from { opacity: 0; transform: translateY(-4px); }
   to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  @keyframes wl-fadeIn {
+    from { opacity: 0; transform: none; }
+    to { opacity: 1; transform: none; }
+  }
 }
 
 /* ─── Coaching tip ────────────────────────────────────────────────── */

@@ -405,12 +405,15 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     storeIncomingAuth(message)
       .then(() => {
         sendResponse({ success: true });
+        // Tells an open popup to repaint. runtime.sendMessage only reaches
+        // extension pages, and a closed popup is the normal case, so "no
+        // receiving end" is expected here, as at the AUTH_EXPIRED sends.
         chrome.runtime.sendMessage({
           type: 'AUTH_SUCCESS',
           token: message.token,
           refresh_token: message.refresh_token,
           expires_at: message.expires_at,
-        });
+        }).catch(() => {});
       })
       .catch(() => sendResponse({ success: false, error: 'Invalid token' }));
     return true;

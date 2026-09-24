@@ -1,5 +1,6 @@
-// Wavelength Gmail Content Script — Grammarly-style floating button + card
-// Small circular button in compose window, floating card with suggestions
+// Wavelength Gmail Content Script — Grammarly-style button + card
+// One small circular button per compose, in Gmail's Send row; one floating
+// card that follows whichever compose has the cursor (WL-005).
 //
 // Runs as a content script in Gmail, and is also `require`d by the Jest suite
 // so the card's real behaviour can be asserted rather than reimplemented.
@@ -22,6 +23,7 @@ const GMAIL_TOP_CHROME_PX = 64; // sticky header — keep the fixed card out fro
 const BTN_SIZE_PX = 32;
 const BTN_BOTTOM_PAD_PX = 8;
 const BTN_RIGHT_PAD_PX = 48;
+const BTN_WRAP_INSET_PX = 6; // (44 - 32) / 2: the wrap centres the button
 
 // ─── Font injection (MV3-safe) ──────────────────────────────────────
 (function injectFonts() {
@@ -41,21 +43,40 @@ const BTN_RIGHT_PAD_PX = 48;
   document.head.appendChild(style);
 })();
 
+// ─── State ───────────────────────────────────────────────────────────
+// Per-compose state: `composes` looks a state up by its editable; `liveComposes`
+// is the iterable view (a WeakMap cannot be walked). Any number of composes can
+// be registered at once. `activeComposeEl` is the FOCUSED compose: the one the
+// single shared card shows and the only one whose card ever opens.
+const composes = new WeakMap();
+const liveComposes = new Set();
 let activeComposeEl = null;
-let activeDialog = null;
-let debounceTimer = null;
-let recipientPollTimer = null;
+let discoveryInstalled = false;
+
+// Shared-card follow handles (one card, so one set).
 let cardFollowRaf = null;
 let cardFollowScrollHandler = null;
 let cardFollowResizeHandler = null;
 let cardHostResizeObserver = null;
 let cardVisibilityObserver = null;
-let lastDraft = '';
-let lastRewrite = '';
-let emailCache = new Map();
+
+// One follower for every body-mounted button (the fallback mount, §4 of the
+// plan). Installed only while at least one such button exists.
+let bodyFollowRaf = null;
+let bodyFollowHandler = null;
+
+// email → { id, at }. Positive hits live for the page; a miss is retried after
+// EMAIL_NEGATIVE_TTL_MS (a recipient who signs up later, a transient error).
+// Cleared whenever the token changes.
+const emailCache = new Map();
 let hasToken = false;
+let lastToken = null;
+let lastAuthCheckAt = 0;
 let cachedUserInfo = null;
-let applyingRewrite = false;
+
+const APPLY_SETTLE_MS = 500; // Gmail settles its DOM churn after our own writes
+const AUTH_RECHECK_MS = 5000; // sign-in never reaches this tab (WL-024): re-ask on focus, throttled
+const EMAIL_NEGATIVE_TTL_MS = 60 * 1000;
 
 // Multi-level undo for Apply / subject Use (Cmd+Z does not cover Range writes).
 const WL_UNDO_CAP = 10;
@@ -69,23 +90,106 @@ const WL_ICON_UNDO =
   '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8h11a5 5 0 0 1 0 10H8"/><path d="M7 4 3 8l4 4"/></svg>';
 const WL_ICON_TICK =
   '<svg class="wl-done-tick" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 13 4.5 4.5L19 7"/></svg>';
-let lastEventId = null;
-let contentObserver = null;
-let closeObserver = null;
+// The button mark. `currentColor` so the quiet (unfocused) variant recolours by CSS.
+const WL_BTN_LOGO =
+  '<svg viewBox="0 0 200 200" width="20" height="20" aria-hidden="true"><path d="M 44 54 L 76 146 L 108 85 L 128 128 L 156 92" fill="none" stroke="currentColor" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
-// Track injected buttons per compose element
-const injectedComposes = new WeakSet();
+// Same two selectors the compose scanner used; a compose editable is one of these.
+const COMPOSE_EDITABLE_SELECTOR =
+  '[role="dialog"] [contenteditable="true"][aria-label], [contenteditable="true"][aria-label="Message Body"]';
+
+// ─── Per-compose state ───────────────────────────────────────────────
+// Everything that used to be a module-level "the compose" variable lives here,
+// one object per editable. Four pieces stay on the element itself because the
+// card code reads them there: `_wlUndoStack`, `_wlSource`, `_wlLastResult`,
+// `_wlWantFooter`.
+function createComposeState(el) {
+  return {
+    el,
+    // The node Gmail removes when this compose closes: the popup dialog, or the
+    // inline reply's `.M9` block (discard and pop-out remove that, twenty levels
+    // above the editable; probed live 2026-09-24). Its parent is observed.
+    closeRoot: el.closest('[role="dialog"]') || el.closest('.M9'),
+    host: null, // the compose chrome around the editable; visibility and the body fallback read it
+    footer: null, // Gmail's Send row (`.aDh`) when the button is mounted in it
+    owner: `wl${Math.random().toString(36).slice(2, 10)}`, // stamps this compose's button
+    mount: null, // 'row' | 'body'
+    wrap: null, // .wl-btn-wrap: the 44px box holding the button and its badge
+    btn: null,
+    badge: null,
+    debounceTimer: null,
+    recipientPollTimer: null,
+    applyingTimer: null,
+    contentObserver: null,
+    closeObserver: null,
+    footerObserver: null,
+    hostResize: null,
+    onInput: null,
+    lastDraft: '', // dedupe key: always the live zone-1 text (see analyzeCurrentDraft)
+    lastEventId: null,
+    runSeq: 0, // bumped per ANALYZE request; an older response never overwrites a newer one
+    applying: false, // our own write is in progress: observers and input must stand down
+    card: null, // { status, data }: the last updateCard for this compose, painted or not
+    appliedEventId: null, // the result whose rewrite is in the box; drives the Applied pill
+    status: 'idle', // idle | analyzing | ready | attention | error — drives the badge
+  };
+}
+
+function getState(el) {
+  return (el && composes.get(el)) || null;
+}
+
+function isAlive(state) {
+  return !!state && composes.get(state.el) === state && state.el.isConnected;
+}
+
+function isActive(composeEl) {
+  return !!composeEl && composeEl === activeComposeEl;
+}
+
+// Frozen view for the test suite: never the mutable state itself.
+function getComposeSnapshot(el) {
+  const state = getState(el);
+  if (!state) return Object.freeze({ registered: false, active: false, status: null, mount: null });
+  return Object.freeze({
+    registered: true,
+    active: isActive(el),
+    status: state.status,
+    mount: state.mount,
+  });
+}
+
+function setApplying(state) {
+  if (!state) return;
+  clearTimeout(state.applyingTimer);
+  state.applyingTimer = null;
+  state.applying = true;
+}
+
+// Release after Gmail has settled its DOM updates. Must run on every path,
+// including refusal, or every later input and mutation is dropped.
+function releaseApplying(state) {
+  if (!state) return;
+  clearTimeout(state.applyingTimer);
+  state.applyingTimer = setTimeout(() => {
+    state.applying = false;
+    state.applyingTimer = null;
+  }, APPLY_SETTLE_MS);
+}
 
 // ─── Bootstrap ───────────────────────────────────────────────────────
 // ─── Auth check ──────────────────────────────────────────────────────
 async function checkAuth() {
+  let token = null;
   try {
-    const token = await chrome.runtime.sendMessage({ type: 'GET_TOKEN' });
-    hasToken = !!token;
-    if (hasToken) fetchUserInfo();
+    token = (await chrome.runtime.sendMessage({ type: 'GET_TOKEN' })) || null;
   } catch {
-    hasToken = false;
+    token = null;
   }
+  if (token !== lastToken) emailCache.clear(); // one account's visibility never serves another
+  lastToken = token;
+  hasToken = !!token;
+  if (hasToken) fetchUserInfo();
 }
 
 async function fetchUserInfo() {
@@ -105,83 +209,119 @@ function getUserInitial() {
   return 'W';
 }
 
-// Re-check auth whenever token changes (e.g. after sign-in or expiry)
-if (IN_EXTENSION) chrome.runtime.onMessage.addListener((message) => {
-  if (message.type === 'AUTH_SUCCESS' || message.type === 'SET_TOKEN') {
-    hasToken = true;
-    fetchUserInfo();
-    // Trigger observer re-scan in case compose is already open
-    if (activeComposeEl === null) {
-      const editors = document.querySelectorAll(
-        '[role="dialog"] [contenteditable="true"][aria-label], [contenteditable="true"][aria-label="Message Body"]'
-      );
-      if (editors.length > 0) attachToCompose(editors[0]);
-    }
-  }
-  if (message.type === 'AUTH_EXPIRED') {
-    hasToken = false;
-    if (activeComposeEl) {
-      updateCard(activeComposeEl, {
-        status: 'error',
-        message: 'Your Wavelength session expired. Click the Wavelength icon in your toolbar to sign back in.',
-      });
-    }
-  }
-});
-
-if (IN_EXTENSION) checkAuth().then(() => {
-  observeComposeWindows();
-  // Scan immediately in case compose is already open when extension loads
-  const editors = document.querySelectorAll(
-    '[role="dialog"] [contenteditable="true"][aria-label], [contenteditable="true"][aria-label="Message Body"]'
-  );
-  if (editors.length > 0 && hasToken) {
-    attachToCompose(editors[0]);
-  }
-});
-
-// ─── Compose window detection ────────────────────────────────────────
-function observeComposeWindows() {
-  const observer = new MutationObserver(() => {
-    if (!hasToken) return;
-    // Skip observer during our own rewrite to prevent self-detach
-    if (applyingRewrite) return;
-
-    // Detect dialog-based compose
-    const dialogEditors = document.querySelectorAll(
-      '[role="dialog"] [contenteditable="true"][aria-label]'
-    );
-    // Detect inline compose (reply/forward)
-    const inlineEditors = document.querySelectorAll(
-      '[contenteditable="true"][aria-label="Message Body"]'
-    );
-
-    const allEditors = new Set([...dialogEditors, ...inlineEditors]);
-
-    if (allEditors.size === 0) {
-      if (activeComposeEl) {
-        detachCompose();
-      }
-      return;
-    }
-
-    // Attach to the first unattached compose, or keep current
-    for (const el of allEditors) {
-      if (el === activeComposeEl) return;
-      if (!el.dataset.wavelengthAttached) {
-        attachToCompose(el);
-        return;
-      }
-    }
-  });
-
-  observer.observe(document.body, { childList: true, subtree: true });
+// Sign-in and sign-out never reach this tab as messages (the background's
+// runtime.sendMessage is delivered to extension pages only, WL-024), so the
+// token is re-asked on focus, throttled, whenever we think we are signed out.
+function maybeRecheckAuth() {
+  const now = Date.now();
+  if (now - lastAuthCheckAt < AUTH_RECHECK_MS) return Promise.resolve(hasToken);
+  lastAuthCheckAt = now;
+  return checkAuth().then(() => hasToken);
 }
 
-function clearRecipientPoll() {
-  if (recipientPollTimer !== null) {
-    clearInterval(recipientPollTimer);
-    recipientPollTimer = null;
+if (IN_EXTENSION) {
+  installDiscovery();
+  checkAuth().then(reconcileActive);
+}
+
+// ─── Compose discovery ───────────────────────────────────────────────
+// Composes are found by focus, never by scanning the page: the moment the
+// cursor lands anywhere in a compose (body, To, Subject) that compose is
+// registered if new and made active. Nothing runs between focus changes.
+// One call registers every document-level listener this file owns; it is
+// idempotent so the suite can install it too.
+function installDiscovery() {
+  if (discoveryInstalled) return;
+  discoveryInstalled = true;
+  document.addEventListener('focusin', onFocusIn, true);
+  window.addEventListener('focus', reconcileActive);
+  document.addEventListener('visibilitychange', reconcileActive);
+  window.addEventListener('hashchange', pruneLiveComposes); // Gmail navigates by hash
+  document.addEventListener('click', onDocumentClick);
+  document.addEventListener('keydown', onDocumentKeydown);
+}
+
+// The compose root around a node, in the same precedence zones.js uses.
+function composeSurfaceFor(node) {
+  if (!(node instanceof Element)) return null;
+  return (
+    node.closest('[role="dialog"]') ||
+    node.closest('table.aoP') ||
+    node.closest('div.aoI')
+  );
+}
+
+// The compose editable a focused or clicked node belongs to, or null. Our own
+// UI never counts. A surface qualifies only when it holds exactly one compose
+// editable, so Gmail's search, chat and settings dialogs never match.
+function composeForNode(node) {
+  const el = node instanceof Element ? node : node?.parentElement;
+  if (!el) return null;
+  if (el.closest('.wl-card, .wl-btn-wrap')) return null;
+  if (el.matches(COMPOSE_EDITABLE_SELECTOR) && isComposeMessageEditable(el)) return el;
+  const surface = composeSurfaceFor(el);
+  if (!surface) return null;
+  const editables = [...surface.querySelectorAll('[contenteditable="true"][aria-label]')].filter(
+    isComposeMessageEditable,
+  );
+  return editables.length === 1 ? editables[0] : null;
+}
+
+function onFocusIn(e) {
+  if (!hasToken) {
+    maybeRecheckAuth().then((ok) => {
+      if (ok) discover(document.activeElement);
+    });
+    return;
+  }
+  discover(e.target);
+}
+
+function reconcileActive() {
+  pruneLiveComposes();
+  if (!hasToken) {
+    maybeRecheckAuth().then((ok) => {
+      if (ok) discover(document.activeElement);
+    });
+    return;
+  }
+  discover(document.activeElement);
+}
+
+function discover(node) {
+  if (!hasToken) return;
+  const el = composeForNode(node);
+  if (!el) return;
+  let state = getState(el);
+  if (!state) {
+    // A compose without a visible Send row is not one we can mount in yet
+    // (mid-render, minimised). The next focus into it retries.
+    if (!findVisibleComposeFooter(el, findHost(el))) return;
+    state = registerCompose(el);
+  } else {
+    ensureButton(state);
+  }
+  if (!isActive(el)) activate(el);
+  // First focus after a sign-in: a compose stuck on a session error is coached
+  // again. The error path blanked its dedupe key, so this run never repeats.
+  if (state.status === 'error' && isSessionError(state.card?.data?.message)) {
+    scheduleAnalysis(state);
+  }
+}
+
+// Composes Gmail removed together with an ancestor (leaving a thread with an
+// inline reply) never fire their own close observer. Sweep on the events we
+// already handle.
+function pruneLiveComposes() {
+  for (const state of [...liveComposes]) {
+    if (!state.el.isConnected) teardownCompose(state);
+  }
+}
+
+function clearRecipientPoll(state) {
+  if (state && state.recipientPollTimer !== null) {
+    clearTimeout(state.recipientPollTimer);
+    state.recipientPollTimer = null;
   }
 }
 
@@ -189,126 +329,162 @@ function clearRecipientPoll() {
 // bare attach-time call — Gmail often renders the body before the To row.
 // Non-empty is safe: extractRecipientEmails only counts chips in a compose
 // To/Cc/Bcc row, so thread-header chips cannot satisfy the stop (WL-047).
-function pollForRecipientThenAnalyze(composeEl) {
-  clearRecipientPoll();
+// A setTimeout chain, not an interval: it dies with its compose (WL-023).
+function pollForRecipientThenAnalyze(state) {
+  clearRecipientPoll(state);
   const startedAt = Date.now();
-  let done = false;
 
   function tick() {
-    if (activeComposeEl !== composeEl) {
-      clearRecipientPoll();
-      return;
-    }
+    state.recipientPollTimer = null;
+    if (!isAlive(state)) return;
 
-    const emails = extractRecipientEmails(composeEl);
+    const emails = extractRecipientEmails(state.el);
     const elapsed = Date.now() - startedAt;
 
     if (emails.length > 0 || elapsed >= RECIPIENT_POLL_CEILING_MS) {
-      done = true;
-      clearRecipientPoll();
-      if (activeComposeEl !== composeEl) return;
-      analyzeCurrentDraft();
+      analyzeCurrentDraft(state.el);
+      return;
     }
+    state.recipientPollTimer = setTimeout(tick, RECIPIENT_POLL_MS);
   }
 
   tick();
-  if (!done) recipientPollTimer = setInterval(tick, RECIPIENT_POLL_MS);
 }
 
-function onComposeSubtreeMutated() {
-  if (applyingRewrite) return;
-  if (activeComposeEl) {
-    const body = activeComposeEl._wlCard?.querySelector('.wl-card-body');
-    if (body) syncUseThisEligibility(body, activeComposeEl);
-  }
-  clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(() => analyzeCurrentDraft(), DEBOUNCE_MS);
+function scheduleAnalysis(state) {
+  clearTimeout(state.debounceTimer);
+  state.debounceTimer = setTimeout(() => analyzeCurrentDraft(state.el), DEBOUNCE_MS);
 }
 
-function attachToCompose(composeEl) {
-  if (activeComposeEl) detachCompose();
+// ─── Register / activate / tear down ─────────────────────────────────
+// Create this compose's state, button, listeners and observers, and run the
+// attach-time analysis. Does not make it the active compose; activate does.
+function registerCompose(composeEl) {
+  const existing = getState(composeEl);
+  if (existing) return existing;
 
-  composeEl.dataset.wavelengthAttached = 'true';
-  activeComposeEl = composeEl;
-  activeDialog = composeEl.closest('[role="dialog"]') || composeEl.closest('.aO7');
+  const state = createComposeState(composeEl);
+  composes.set(composeEl, state);
+  liveComposes.add(state);
+  state.host = findHost(composeEl);
 
-  injectFloatingButton(composeEl);
+  mountButton(state);
 
-  // Listen for input with debounce
-  composeEl.addEventListener('input', onComposeInput);
+  // Listen for input with debounce — a closure per compose, so typing in one
+  // compose can never reset another's timer.
+  state.onInput = () => {
+    if (state.applying) return;
+    ensureButton(state);
+    scheduleAnalysis(state);
+  };
+  composeEl.addEventListener('input', state.onInput);
 
   // Expand/collapse mutates the editable without firing input (Probe B).
-  contentObserver = new MutationObserver(onComposeSubtreeMutated);
-  contentObserver.observe(composeEl, { childList: true, subtree: true });
+  // Observed on the editable only, never the compose chrome around it, or our
+  // own badge and spinner changes would loop the analysis.
+  state.contentObserver = new MutationObserver(() => {
+    if (state.applying) return;
+    ensureButton(state);
+    if (isActive(composeEl)) {
+      const body = getCard().querySelector('.wl-card-body');
+      if (body) syncUseThisEligibility(body, composeEl);
+    }
+    scheduleAnalysis(state);
+  });
+  state.contentObserver.observe(composeEl, { childList: true, subtree: true });
 
-  // Watch for compose close (but not during our own rewrite)
-  if (activeDialog?.parentNode) {
-    closeObserver = new MutationObserver((mutations) => {
-      if (applyingRewrite) return;
+  // Watch for compose close. A childList observer on the dialog's parent never
+  // sees our own writes, so it needs no `applying` gate. Gmail re-parents
+  // popups when it slides them sideways, so a removal is only a close once the
+  // node is still gone a tick later.
+  if (state.closeRoot?.parentNode) {
+    state.closeObserver = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
         for (const node of mutation.removedNodes) {
-          if (node === activeDialog || node.contains?.(composeEl)) {
-            detachCompose();
+          if (node === state.closeRoot || node.contains?.(composeEl)) {
+            setTimeout(() => {
+              if (!state.el.isConnected) teardownCompose(state);
+            }, 0);
             return;
           }
         }
       }
     });
-    closeObserver.observe(activeDialog.parentNode, { childList: true });
+    state.closeObserver.observe(state.closeRoot.parentNode, { childList: true });
   }
 
-  // Periodically verify our button/card still exist in the DOM; re-inject if Gmail removed them
-  const integrityCheck = setInterval(() => {
-    if (!activeComposeEl || activeComposeEl !== composeEl) {
-      clearInterval(integrityCheck);
-      return;
-    }
-    if (!document.contains(composeEl)) {
-      detachCompose();
-      return;
-    }
-    const btn = composeEl._wlBtn;
-    if (!btn || !document.contains(btn)) {
-      // Button was removed from DOM — re-inject. Body-mounted: must replace,
-      // not stack, or each redraw leaves another .wl-btn on document.body.
-      injectedComposes.delete(composeEl);
-      injectFloatingButton(composeEl);
-    }
-  }, 1000);
+  // Analyse once on registration so drafts (and any pre-filled compose) coach
+  // without waiting for input. Empty composes stay silent — analyzeCurrentDraft
+  // already guards on length. Never repeated on a later focus.
+  pollForRecipientThenAnalyze(state);
 
-  // Analyse once on attach so drafts (and any pre-filled compose) coach without waiting for input.
-  // Empty composes stay silent — analyzeCurrentDraft already guards on length.
-  pollForRecipientThenAnalyze(composeEl);
+  return state;
 }
 
-function detachCompose() {
-  if (contentObserver) {
-    contentObserver.disconnect();
-    contentObserver = null;
+// Make this compose the one the shared card shows. Never triggers an analysis:
+// the compose's own dedupe key still gates the next input-driven run.
+function activate(composeEl) {
+  const state = getState(composeEl);
+  if (!state) return;
+
+  const previous = getState(activeComposeEl);
+  const cardWasOpen = isCardOpen();
+
+  // Switch the slot first: the visuals read it to pick filled vs quiet.
+  activeComposeEl = composeEl;
+  if (previous && previous !== state) setButtonFocused(previous, false);
+  setButtonFocused(state, true);
+
+  // The card always repaints from THIS compose's last snapshot (or the hint),
+  // and its actions rebind to this compose. It reopens only when it was open
+  // and this compose has a result: close-then-reopen, so the existing fade
+  // marks the switch instead of a jump.
+  hideCoachingCard();
+  paintCardFromState(state);
+  if (cardWasOpen && state.card?.status === 'result') showCoachingCard(composeEl);
+}
+
+// Undo everything registerCompose did for one compose. Takes the state, or
+// the editable (the suite's handle).
+function teardownCompose(stateOrEl) {
+  const state = stateOrEl instanceof Element ? getState(stateOrEl) : stateOrEl;
+  if (!state) return;
+  const el = state.el;
+
+  state.contentObserver?.disconnect();
+  state.contentObserver = null;
+  state.closeObserver?.disconnect();
+  state.closeObserver = null;
+  state.footerObserver?.disconnect();
+  state.footerObserver = null;
+  state.hostResize?.disconnect();
+  state.hostResize = null;
+  clearTimeout(state.debounceTimer);
+  state.debounceTimer = null;
+  clearRecipientPoll(state);
+  clearTimeout(state.applyingTimer);
+  state.applyingTimer = null;
+
+  if (state.onInput) el.removeEventListener('input', state.onInput);
+  state.onInput = null;
+  state.wrap?.remove();
+  state.wrap = null;
+  state.btn = null;
+  state.badge = null;
+  el._wlBtn = null;
+  el._wlUndoStack = null;
+  el._wlSource = null;
+  el._wlLastResult = null;
+  el._wlWantFooter = undefined;
+
+  if (composes.get(el) === state) composes.delete(el);
+  liveComposes.delete(state);
+
+  if (activeComposeEl === el) {
+    activeComposeEl = null;
+    hideCoachingCard();
   }
-  if (closeObserver) {
-    closeObserver.disconnect();
-    closeObserver = null;
-  }
-  stopFollowingCard();
-  if (activeComposeEl) {
-    activeComposeEl.removeEventListener('input', onComposeInput);
-    removePageDismissListeners(activeComposeEl);
-    activeComposeEl._wlBtn?.remove();
-    activeComposeEl._wlCard?.remove();
-    activeComposeEl._wlBtn = null;
-    activeComposeEl._wlCard = null;
-    activeComposeEl._wlUndoStack = null;
-    activeComposeEl._wlHost = null;
-  }
-  activeComposeEl = null;
-  activeDialog = null;
-  lastDraft = '';
-  lastRewrite = '';
-  lastEventId = null;
-  clearTimeout(debounceTimer);
-  clearRecipientPoll();
-  emailCache.clear();
+  syncBodyFollower();
 }
 
 function getUndoStack(composeEl) {
@@ -606,7 +782,7 @@ function syncSubjectRow(container, result, composeEl) {
       pushUndoSnapshot(composeEl, {
         zone1Html: null,
         subject: subjectBefore,
-        lastDraft,
+        lastDraft: getState(composeEl)?.lastDraft ?? '',
         hadFooter: false,
         wroteBody: false,
         subjectChanged: true,
@@ -636,8 +812,9 @@ function undoRewrite(container, composeEl) {
   if (stack.length === 0) return;
 
   const entry = stack[stack.length - 1];
-  applyingRewrite = true;
-  clearTimeout(debounceTimer);
+  const state = getState(composeEl);
+  setApplying(state);
+  clearTimeout(state?.debounceTimer);
   clearUndoRefusal(container);
 
   try {
@@ -646,6 +823,7 @@ function undoRewrite(container, composeEl) {
     if (entry.wroteBody) {
       if (!editable) {
         stack.length = 0;
+        composeEl._wlSource = null; // box state unknown: regen falls back to live
         rehydrateActionRow(container, composeEl);
         wakeUseThisButton(container, composeEl);
         return;
@@ -669,6 +847,7 @@ function undoRewrite(container, composeEl) {
       if (!result.ok) {
         // Throw / malformed — leave tree, clear undo state. Never innerHTML fallback.
         stack.length = 0;
+        composeEl._wlSource = null;
         rehydrateActionRow(container, composeEl);
         wakeUseThisButton(container, composeEl);
         return;
@@ -689,8 +868,14 @@ function undoRewrite(container, composeEl) {
       setSubjectValue(composeEl, entry.subject);
     }
 
-    lastDraft = entry.lastDraft;
+    if (state) state.lastDraft = entry.lastDraft;
+    // The box is back to what this entry's card was coached from.
+    if (entry.wroteBody) composeEl._wlSource = entry.source || null;
     stack.pop();
+    if (entry.wroteBody && state) {
+      state.appliedEventId = null;
+      applyButtonVisuals(state);
+    }
 
     // Body undo (or any wroteBody pop) wakes primary — card still offers a rewrite
     // the body no longer contains. Subject-only undo leaves body Applied when a
@@ -715,13 +900,11 @@ function undoRewrite(container, composeEl) {
     syncSubjectRow(container, composeEl._wlLastResult, composeEl);
     if (activeComposeEl) positionCoachingCard(activeComposeEl);
   } finally {
-    setTimeout(() => {
-      applyingRewrite = false;
-    }, 500);
+    releaseApplying(state);
   }
 }
 
-// ─── Floating button injection ───────────────────────────────────────
+// ─── Shared card: follow, show, hide ─────────────────────────────────
 function stopFollowingCard() {
   if (cardFollowRaf !== null) {
     cancelAnimationFrame(cardFollowRaf);
@@ -760,24 +943,64 @@ function isAnchorVisible(btn) {
   return true;
 }
 
-function hideCoachingCard(composeEl) {
-  const card = composeEl?._wlCard;
-  const btn = composeEl?._wlBtn;
+// The one card on the page, created on first use and re-created if something
+// removed it. Its ✕ is bound once and closes whatever compose is active.
+function getCard() {
+  let card = document.getElementById(CARD_ID);
+  if (card?.isConnected) return card;
+  document.querySelectorAll('.wl-card').forEach((el) => el.remove()); // exactly one
+
+  // Card on document.body — escapes .qz.aiL clip. Positioned fixed against the viewport.
+  card = document.createElement('div');
+  card.className = 'wl-card';
+  card.id = CARD_ID;
+  card.style.display = 'none';
+  card.innerHTML = `
+    <div class="wl-card-header">
+      <svg class="wl-card-logo" viewBox="0 0 200 200" width="20" height="20">
+        <defs><linearGradient id="wl-g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#B8372B"></stop><stop offset="55%" stop-color="#D46A3A"></stop><stop offset="100%" stop-color="#EDA324"></stop></linearGradient></defs><circle cx="100" cy="100" r="96" fill="url(#wl-g)"></circle>
+        <path d="M 44 54 L 76 146 L 108 85 L 128 128 L 156 92" fill="none" stroke="#FFFDFB" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"></path>
+      </svg>
+      <span class="wl-card-title">Wavelength</span>
+      <button class="wl-card-close" type="button" aria-label="Close">×</button>
+    </div>
+    <div class="wl-card-body">
+      <p class="wl-hint">Start typing to get suggestions…</p>
+    </div>
+  `;
+  card.querySelector('.wl-card-close').addEventListener('click', (e) => {
+    e.stopPropagation();
+    hideCoachingCard();
+  });
+  document.body.appendChild(card);
+  return card;
+}
+
+function isCardOpen() {
+  const card = document.getElementById(CARD_ID);
+  return !!card && card.style.display !== 'none';
+}
+
+function hideCoachingCard() {
+  const card = document.getElementById(CARD_ID);
+  const active = getState(activeComposeEl);
+  // Keyboard users: never strand focus on a hidden card.
+  if (card && card.contains(document.activeElement) && activeComposeEl) activeComposeEl.focus();
   if (card) card.style.display = 'none';
-  if (btn) btn.setAttribute('aria-expanded', 'false');
-  // Do not stopFollowingCard — the button is body-mounted and must keep
-  // tracking the visible compose after the card closes.
+  active?.btn?.setAttribute('aria-expanded', 'false');
+  stopFollowingCard();
 }
 
 function showCoachingCard(composeEl) {
-  const card = composeEl?._wlCard;
-  const btn = composeEl?._wlBtn;
-  if (!card || !btn) return;
-  // Button lives inside the clipper — if it is gone, do not float an orphan card.
-  if (!isAnchorVisible(btn)) return;
+  if (!isActive(composeEl)) return;
+  const state = getState(composeEl);
+  if (!state?.btn) return;
+  // Never float an orphan card: the anchor must be on screen.
+  if (!isAnchorVisible(state.btn)) return;
 
+  const card = getCard();
   card.style.display = 'block';
-  btn.setAttribute('aria-expanded', 'true');
+  state.btn.setAttribute('aria-expanded', 'true');
   // Subject visibility can change while the card was closed (e.g. Edit subject).
   const body = card.querySelector('.wl-card-body');
   if (body && composeEl._wlLastResult) {
@@ -787,76 +1010,90 @@ function showCoachingCard(composeEl) {
   startFollowingCard(composeEl);
 }
 
+// While the card is open it follows the active compose: capture-phase scroll,
+// window resize, the host's ResizeObserver, and one rect read per frame so a
+// docked popup that Gmail slides sideways re-anchors it. Everything stops when
+// the card closes.
 function startFollowingCard(composeEl) {
   stopFollowingCard();
 
-  const btn = composeEl?._wlBtn;
-  const card = composeEl?._wlCard;
+  const state = getState(composeEl);
+  const btn = state?.btn;
+  const card = document.getElementById(CARD_ID);
   if (!btn || !card) return;
 
-  const scheduleReposition = () => {
-    if (cardFollowRaf !== null) return;
-    cardFollowRaf = requestAnimationFrame(() => {
-      cardFollowRaf = null;
-      if (activeComposeEl !== composeEl) {
-        hideCoachingCard(composeEl);
-        return;
-      }
-      positionFloatingButton(composeEl);
-      if (!card || card.style.display === 'none') return;
+  let lastTop = null;
+  let lastLeft = null;
+  let dockDirty = false; // a scroll, resize or host resize: re-check the dock too
+
+  // One button rect read per frame. The dock check (host + row rects) runs
+  // only after an event that can change it, never on the idle frames.
+  const frame = () => {
+    cardFollowRaf = null;
+    if (!isActive(composeEl) || !isCardOpen()) return;
+    if (dockDirty) {
+      dockDirty = false;
+      refreshButtonPlacement(state);
+      if (!isCardOpen()) return;
+    }
+    const rect = btn.getBoundingClientRect();
+    if (rect.top !== lastTop || rect.left !== lastLeft) {
+      lastTop = rect.top;
+      lastLeft = rect.left;
       if (!isAnchorVisible(btn)) {
-        hideCoachingCard(composeEl);
+        hideCoachingCard();
         return;
       }
       positionCoachingCard(composeEl);
-    });
+    }
+    if (isCardOpen()) cardFollowRaf = requestAnimationFrame(frame);
   };
+  cardFollowRaf = requestAnimationFrame(frame);
 
+  const markDirty = () => {
+    dockDirty = true;
+    lastTop = null; // force a reposition on the next frame
+  };
   cardFollowScrollHandler = (event) => {
     // Card-internal scroll should not thrash reposition.
     if (card.contains(event.target)) return;
-    scheduleReposition();
+    markDirty();
   };
-  cardFollowResizeHandler = () => scheduleReposition();
+  cardFollowResizeHandler = markDirty;
 
   document.addEventListener('scroll', cardFollowScrollHandler, true);
   window.addEventListener('resize', cardFollowResizeHandler);
 
-  if (typeof ResizeObserver !== 'undefined' && composeEl._wlHost) {
-    cardHostResizeObserver = new ResizeObserver(() => scheduleReposition());
-    cardHostResizeObserver.observe(composeEl._wlHost);
+  if (typeof ResizeObserver !== 'undefined' && state.host) {
+    cardHostResizeObserver = new ResizeObserver(markDirty);
+    cardHostResizeObserver.observe(state.host);
   }
 
+  // Observe the compose itself, not the button: the button may sit in a Send
+  // row Gmail keeps pinned after the compose has scrolled away.
   cardVisibilityObserver = new IntersectionObserver(
     (entries) => {
       for (const entry of entries) {
+        if (!composeEl.isConnected) {
+          teardownCompose(state);
+          return;
+        }
         if (!entry.isIntersecting) {
-          hideCoachingCard(composeEl);
+          hideCoachingCard();
           return;
         }
       }
     },
     { threshold: 0 }
   );
-  cardVisibilityObserver.observe(btn);
-}
-
-function removePageDismissListeners(composeEl) {
-  if (!composeEl) return;
-  if (composeEl._wlDocClick) {
-    document.removeEventListener('click', composeEl._wlDocClick);
-    composeEl._wlDocClick = null;
-  }
-  if (composeEl._wlDocKeydown) {
-    document.removeEventListener('keydown', composeEl._wlDocKeydown);
-    composeEl._wlDocKeydown = null;
-  }
+  cardVisibilityObserver.observe(composeEl);
 }
 
 // Visible Send-row wrapper for this compose. Fail closed: never document.
 // `.aDh` with a non-zero box — do not use [aria-label^=Send]; a 0×0 div.ua
-// also matches that. Measured 2026-08-26: inline overlay is `.aDj.ahe`
-// (position:fixed); popup footer is `.aDj.aDn` (position:static).
+// also matches that. Measured 2026-09-24: the row sits in `.aDj`, which is
+// position:absolute inline and position:fixed in a popup (and when Gmail pins
+// the inline row on a tall thread).
 function findVisibleComposeFooter(composeEl, host) {
   const scopes = [];
   const dialog = composeEl.closest('[role="dialog"]');
@@ -897,29 +1134,11 @@ function visibleComposeDock(host, footer) {
   return { top, bottom: dockBottom, left, right };
 }
 
-// Option B: body-mount + viewport clamp. Not A — inline Send's `.aDj.ahe` is
-// position:fixed and stays on screen after the compose scrolls off the thread
-// (check 5). Not C — `.qz.aiL { overflow:auto }` traps sticky. Popup already
-// sits on the dialog; this clamp is a no-op while the dialog is on screen.
-function positionFloatingButton(composeEl) {
-  const btn = composeEl?._wlBtn;
-  const host = composeEl?._wlHost;
-  if (!btn || !host) return;
-
-  const footer = findVisibleComposeFooter(composeEl, host);
-  const dock = visibleComposeDock(host, footer);
-  if (!dock) {
-    btn.style.top = '-9999px';
-    btn.style.left = '0px';
-    return;
-  }
-  const top = dock.bottom - BTN_BOTTOM_PAD_PX - BTN_SIZE_PX;
-  const left = dock.right - BTN_RIGHT_PAD_PX - BTN_SIZE_PX;
-  btn.style.top = `${Math.round(top)}px`;
-  btn.style.left = `${Math.round(left)}px`;
-}
-
-function injectFloatingButton(composeEl) {
+// ─── Button: one per compose, in Gmail's Send row ────────────────────
+// The compose chrome around the editable. Used for visibility and for the
+// body-mounted fallback's clamp; nothing is ever mounted in it. Must not be
+// (inside) the editable: anything there ends up in the draft (WL-046).
+function findHost(composeEl) {
   const candidates = [
     composeEl.closest('[role="dialog"]'),
     composeEl.closest('.aO7'),
@@ -927,159 +1146,285 @@ function injectFloatingButton(composeEl) {
     composeEl.parentElement?.parentElement,
     composeEl.parentElement,
   ];
-  const host = candidates.find((el) => el && !composeEl.contains(el));
-  if (!host) {
-    console.warn('WL: no host outside the compose editable; not injecting');
-    return;
-  }
-  if (injectedComposes.has(composeEl)) return;
-  injectedComposes.add(composeEl);
+  return candidates.find((el) => el && !composeEl.contains(el)) || null;
+}
 
-  stopFollowingCard();
-  composeEl._wlBtn?.remove();
-  composeEl._wlCard?.remove();
-  // Body-mounted widgets are not cleaned by Gmail. Sweep strays before recreate.
-  document.querySelectorAll('.wl-card, .wl-btn').forEach((el) => el.remove());
+function buildButton(state) {
+  const wrap = document.createElement('span');
+  wrap.className = 'wl-btn-wrap';
+  wrap.dataset.wlOwner = state.owner;
 
-  composeEl._wlHost = host;
-
-  // Create the floating button with logo SVG — body-mounted, clamped to the
-  // visible compose (see positionFloatingButton).
   const btn = document.createElement('button');
   btn.className = 'wl-btn';
-  btn.type = 'button';
-  btn.innerHTML = `<svg viewBox="0 0 200 200" width="20" height="20"><defs><linearGradient id="wl-btn-g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FFFDFB"/><stop offset="100%" stop-color="#FFFDFB"/></linearGradient></defs><path d="M 44 54 L 76 146 L 108 85 L 128 128 L 156 92" fill="none" stroke="#FFFDFB" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-  btn.title = 'Wavelength — Communication Coach';
+  btn.type = 'button'; // inside Gmail's compose form: never the implicit submit
+  btn.innerHTML = WL_BTN_LOGO;
   btn.setAttribute('aria-expanded', 'false');
   btn.setAttribute('aria-controls', CARD_ID);
-  btn.style.top = '-9999px';
-  btn.style.left = '0px';
-  document.body.appendChild(btn);
-
-  // Card on document.body — escapes .qz.aiL clip. Positioned fixed against the viewport.
-  const card = document.createElement('div');
-  card.className = 'wl-card';
-  card.id = CARD_ID;
-  card.style.display = 'none';
-  document.body.appendChild(card);
-
-  // Initial card content — uses inline SVG logo mark from design system
-  card.innerHTML = `
-    <div class="wl-card-header">
-      <svg class="wl-card-logo" viewBox="0 0 200 200" width="20" height="20">
-        <defs><linearGradient id="wl-g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#B8372B"></stop><stop offset="55%" stop-color="#D46A3A"></stop><stop offset="100%" stop-color="#EDA324"></stop></linearGradient></defs><circle cx="100" cy="100" r="96" fill="url(#wl-g)"></circle>
-        <path d="M 44 54 L 76 146 L 108 85 L 128 128 L 156 92" fill="none" stroke="#FFFDFB" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"></path>
-      </svg>
-      <span class="wl-card-title">Wavelength</span>
-      <button class="wl-card-close" type="button" aria-label="Close">\u00D7</button>
-    </div>
-    <div class="wl-card-body">
-      <p class="wl-hint">Start typing to get suggestions\u2026</p>
-    </div>
-  `;
-
-  // Toggle card on button click
+  // Keep the caret in the draft: the button never takes focus on click, so
+  // clicking it is never a compose switch. Keyboard activation still works.
+  btn.addEventListener('mousedown', (e) => e.preventDefault());
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
-    const isVisible = card.style.display !== 'none';
-    if (isVisible) {
-      hideCoachingCard(composeEl);
-    } else {
-      showCoachingCard(composeEl);
-    }
+    onButtonClick(state);
   });
 
-  // Close button inside card
-  card.querySelector('.wl-card-close').addEventListener('click', (e) => {
-    e.stopPropagation();
-    hideCoachingCard(composeEl);
-  });
+  const badge = document.createElement('span');
+  badge.className = 'wl-badge';
+  badge.setAttribute('aria-hidden', 'true');
+  badge.hidden = true;
 
-  // Dismiss card on outside click.
-  // Skip detached targets — Apply / Regen / Undo / subject Use re-render the
-  // action row and remove the clicked node before this bubbles. contains() on a
-  // detached node is false, which would hide the card on its own controls.
-  function onDocClick(e) {
-    if (!(e.target instanceof Node) || !e.target.isConnected) return;
-    if (!card.contains(e.target) && e.target !== btn) {
-      hideCoachingCard(composeEl);
+  wrap.append(btn, badge);
+  state.wrap = wrap;
+  state.btn = btn;
+  state.badge = badge;
+  state.el._wlBtn = btn;
+  applyButtonVisuals(state);
+  return wrap;
+}
+
+// Mount inside the Send row (`.aDh`): an absolutely positioned child resolves
+// against `.aDj`, the row's own positioned wrapper on both surfaces, so it
+// rides the row wherever Gmail puts it — pinned or not — with no measuring
+// and no inline style on any Gmail node. Body mount is the fallback when no
+// row exists; it is today's clamp, kept as is.
+function mountButton(state) {
+  const el = state.el;
+  document
+    .querySelectorAll(`.wl-btn-wrap[data-wl-owner="${state.owner}"]`)
+    .forEach((n) => n.remove());
+  const wrap = buildButton(state);
+
+  const footer = findVisibleComposeFooter(el, state.host);
+  if (footer && !footer.closest('[contenteditable="true"]')) {
+    state.mount = 'row';
+    state.footer = footer;
+    wrap.classList.add('wl-btn-wrap--row');
+    footer.appendChild(wrap);
+    observeFooterSwap(state);
+  } else {
+    state.mount = 'body';
+    state.footer = null;
+    wrap.classList.add('wl-btn-wrap--body');
+    document.body.appendChild(wrap);
+  }
+  observeHostResize(state);
+  refreshButtonPlacement(state);
+  syncBodyFollower();
+}
+
+// Gmail swaps the `.aDj` row (pinned ↔ static, full screen). `.aDg` above it is
+// stable; one childList observer there rebuilds the button when the row goes.
+function observeFooterSwap(state) {
+  state.footerObserver?.disconnect();
+  state.footerObserver = null;
+  const stable = state.footer?.parentElement?.parentElement;
+  if (!stable) return;
+  state.footerObserver = new MutationObserver(() => ensureButton(state));
+  state.footerObserver.observe(stable, { childList: true });
+}
+
+function observeHostResize(state) {
+  state.hostResize?.disconnect();
+  state.hostResize = null;
+  if (typeof ResizeObserver === 'undefined' || !state.host) return;
+  state.hostResize = new ResizeObserver(() => refreshButtonPlacement(state));
+  state.hostResize.observe(state.host);
+}
+
+// Hot-path safe: an `isConnected` check only. Re-measuring happens inside
+// mountButton when the button really has to be rebuilt.
+function ensureButton(state) {
+  if (!isAlive(state)) return;
+  if (state.wrap?.isConnected) return;
+  mountButton(state);
+}
+
+// Body-mounted buttons need viewport coordinates; row-mounted ones only need
+// the visibility check. Never called per keystroke.
+function refreshButtonPlacement(state) {
+  if (!state?.wrap || !state.host) return;
+  const footer = state.mount === 'row' ? state.footer : findVisibleComposeFooter(state.el, state.host);
+  const dock = visibleComposeDock(state.host, footer);
+  if (!dock) {
+    state.wrap.style.visibility = 'hidden';
+    if (isActive(state.el)) hideCoachingCard();
+    return;
+  }
+  state.wrap.style.visibility = '';
+  if (state.mount === 'body') {
+    // Option B clamp (kept for the fallback): the 44px wrap centres the 32px button.
+    const top = dock.bottom - BTN_BOTTOM_PAD_PX - BTN_SIZE_PX - BTN_WRAP_INSET_PX;
+    const left = dock.right - BTN_RIGHT_PAD_PX - BTN_SIZE_PX - BTN_WRAP_INSET_PX;
+    state.wrap.style.top = `${Math.round(top)}px`;
+    state.wrap.style.left = `${Math.round(left)}px`;
+  }
+}
+
+// One capture-phase scroll + resize follower for every body-mounted button,
+// rAF-throttled, installed only while such a button exists (never per compose:
+// that was WL-022).
+function syncBodyFollower() {
+  const needed = [...liveComposes].some((s) => s.mount === 'body');
+  if (needed && !bodyFollowHandler) {
+    bodyFollowHandler = () => {
+      if (bodyFollowRaf !== null) return;
+      bodyFollowRaf = requestAnimationFrame(() => {
+        bodyFollowRaf = null;
+        for (const s of liveComposes) if (s.mount === 'body') refreshButtonPlacement(s);
+      });
+    };
+    document.addEventListener('scroll', bodyFollowHandler, true);
+    window.addEventListener('resize', bodyFollowHandler);
+  } else if (!needed && bodyFollowHandler) {
+    document.removeEventListener('scroll', bodyFollowHandler, true);
+    window.removeEventListener('resize', bodyFollowHandler);
+    bodyFollowHandler = null;
+    if (bodyFollowRaf !== null) {
+      cancelAnimationFrame(bodyFollowRaf);
+      bodyFollowRaf = null;
     }
   }
-  function onDocKeydown(e) {
-    if (e.key === 'Escape') {
-      hideCoachingCard(composeEl);
-    }
+}
+
+function onButtonClick(state) {
+  const el = state.el;
+  if (!isActive(el)) {
+    activate(el);
+    showCoachingCard(el);
+    return;
   }
-  // Integrity re-injects without detachCompose — drop any stored pair first
-  // or each redraw stacks a handler that hides the live card.
-  removePageDismissListeners(composeEl);
-  document.addEventListener('click', onDocClick);
-  document.addEventListener('keydown', onDocKeydown);
-  composeEl._wlDocClick = onDocClick;
-  composeEl._wlDocKeydown = onDocKeydown;
-
-  // Store references for updating
-  composeEl._wlBtn = btn;
-  composeEl._wlCard = card;
-  positionFloatingButton(composeEl);
-  startFollowingCard(composeEl);
+  if (isCardOpen()) hideCoachingCard();
+  else showCoachingCard(el);
 }
 
-// ─── Button state helpers ────────────────────────────────────────────
-const WL_BTN_LOGO = `<svg viewBox="0 0 200 200" width="20" height="20"><path d="M 44 54 L 76 146 L 108 85 L 128 128 L 156 92" fill="none" stroke="#FFFDFB" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+// ─── Button visuals: status × focus ──────────────────────────────────
+// Status (idle, analyzing, ready, attention, error) and focus (filled, quiet)
+// are independent axes. The badge is a sibling of the button, so the innerHTML
+// writes below can never wipe it.
+const BUTTON_LABELS = {
+  idle: 'Wavelength',
+  analyzing: 'Wavelength, writing a rewrite',
+  ready: 'Wavelength, rewrite ready',
+  'no-recipient': 'Wavelength, add a recipient',
+  'no-profile': "Wavelength, recipient hasn't set up a profile",
+  'error-recipients': 'Wavelength, one recipient at a time',
+  'error-session': 'Wavelength, sign in again',
+  error: 'Wavelength, something went wrong',
+};
 
-function setBtnLoading(composeEl) {
-  const btn = composeEl?._wlBtn;
-  if (!btn) return;
-  btn.classList.remove('wl-ready');
-  btn.classList.add('wl-loading');
-  btn.innerHTML = '<span class="wl-btn-spinner"></span>';
+// The background answers a missing token with "Not authenticated" and an
+// expired one with the sign-in sentence below; both mean this tab's token is gone.
+const SESSION_ERROR_RE = /not authenticated|session (has )?expired|sign back in|sign in/i;
+const SESSION_ERROR_MESSAGE = 'Your session has expired. Please sign in again.';
+
+function isSessionError(message) {
+  return SESSION_ERROR_RE.test(message || '');
 }
 
-function setBtnReady(composeEl) {
-  const btn = composeEl?._wlBtn;
-  if (!btn) return;
-  btn.classList.remove('wl-loading');
-  btn.classList.add('wl-ready');
-  btn.innerHTML = WL_BTN_LOGO;
+function buttonLabelFor(state) {
+  const data = state.card?.data;
+  if (state.status === 'attention') return BUTTON_LABELS[data?.status] || BUTTON_LABELS.error;
+  if (state.status === 'error') {
+    const message = data?.message || '';
+    if (/one recipient at a time/i.test(message)) return BUTTON_LABELS['error-recipients'];
+    if (isSessionError(message)) return BUTTON_LABELS['error-session'];
+    return BUTTON_LABELS.error;
+  }
+  return BUTTON_LABELS[state.status] || BUTTON_LABELS.idle;
 }
 
-function setBtnIdle(composeEl) {
-  const btn = composeEl?._wlBtn;
-  if (!btn) return;
-  btn.classList.remove('wl-loading', 'wl-ready');
-  btn.innerHTML = WL_BTN_LOGO;
+function applyButtonVisuals(state) {
+  const { btn, badge } = state;
+  if (!btn || !badge) return;
+
+  btn.classList.toggle('wl-loading', state.status === 'analyzing');
+  btn.classList.toggle('wl-ready', state.status === 'ready');
+  btn.classList.toggle('wl-quiet', !isActive(state.el));
+  btn.innerHTML =
+    state.status === 'analyzing' ? '<span class="wl-btn-spinner"></span>' : WL_BTN_LOGO;
+
+  const label = buttonLabelFor(state);
+  btn.setAttribute('aria-label', label);
+  btn.setAttribute('data-tip', label);
+
+  const showReady = state.status === 'ready' && !state.appliedEventId;
+  const showAttention = state.status === 'attention' || state.status === 'error';
+  badge.hidden = !(showReady || showAttention);
+  badge.classList.toggle('wl-badge--ready', showReady);
+  badge.classList.toggle('wl-badge--attention', showAttention);
+  badge.textContent = showReady ? '1' : showAttention ? '!' : '';
 }
 
-// ─── Card content update ─────────────────────────────────────────────
+function setButtonFocused(state, focused) {
+  if (!state?.btn) return;
+  if (!focused) state.btn.setAttribute('aria-expanded', 'false');
+  applyButtonVisuals(state);
+}
+
+function statusForCard(cardStatus) {
+  if (cardStatus === 'result') return 'ready';
+  if (cardStatus === 'analyzing') return 'analyzing';
+  if (cardStatus === 'error') return 'error';
+  if (cardStatus === 'no-recipient' || cardStatus === 'no-profile') return 'attention';
+  return 'idle';
+}
+
+// ─── Card content ────────────────────────────────────────────────────
+// Every status change for a compose lands here. The snapshot and the badge
+// always update; the shared card is painted only when this compose is the
+// active one, and it opens only then (a result for another window is a badge).
 function updateCard(composeEl, data) {
-  const card = composeEl?._wlCard;
-  if (!card) return;
+  const state = getState(composeEl);
+  if (!state) return;
+  state.card = { status: data.status, data };
+  state.status = statusForCard(data.status);
+  if (data.status === 'result') state.appliedEventId = null;
+  if (data.status !== 'result' && data.status !== 'analyzing') composeEl._wlLastResult = null;
+  applyButtonVisuals(state);
+  if (!isActive(composeEl)) return;
+  paintCard(composeEl, data, { autoOpen: true });
+}
+
+function resetCardBody() {
+  const card = getCard();
+  setCardHeader(card, null);
+  card.querySelector('.wl-card-body').innerHTML =
+    `<p class="wl-hint">Start typing to get suggestions…</p>`;
+}
+
+function paintCardFromState(state) {
+  if (!state.card) {
+    resetCardBody();
+    return;
+  }
+  paintCard(state.el, state.card.data, { autoOpen: false });
+}
+
+function paintCard(composeEl, data, { autoOpen }) {
+  const state = getState(composeEl);
+  const card = getCard();
   const body = card.querySelector('.wl-card-body');
-  if (!body) return;
+  if (!state || !body) return;
 
   switch (data.status) {
     case 'analyzing':
-      setBtnLoading(composeEl);
       rememberFooterOpt(composeEl, body);
       // Artifact state 10: keep recipient in the header when already known (e.g. regenerate).
       setCardHeader(card, composeEl._wlLastResult?.recipient_summary || null);
       body.innerHTML = `
         <div class="wl-card-loading">
           <div class="wl-spinner"></div>
-          <p>Crafting your rewrite\u2026</p>
+          <p>Crafting your rewrite…</p>
         </div>
       `;
       break;
 
     case 'no-recipient':
-      setBtnIdle(composeEl);
       setCardHeader(card, null);
       body.innerHTML = `<p class="wl-hint">Add a recipient to get suggestions.</p>`;
       break;
 
     case 'no-profile':
-      setBtnIdle(composeEl);
       setCardHeader(card, null);
       body.innerHTML = `
         <p class="wl-hint">
@@ -1090,22 +1435,24 @@ function updateCard(composeEl, data) {
       break;
 
     case 'error':
-      setBtnIdle(composeEl);
       setCardHeader(card, null);
       body.innerHTML = `
         <div class="wl-reason" role="status">
-          <span class="wl-reason-ico" aria-hidden="true">\u25B2</span>
+          <span class="wl-reason-ico" aria-hidden="true">▲</span>
           <span>${escapeHtml(data.message || 'Something went wrong')}</span>
         </div>
       `;
       break;
 
     case 'result':
-      setBtnReady(composeEl);
       setCardHeader(card, data.result?.recipient_summary || null);
       renderResult(body, data.result, data.recipientEmails, composeEl);
-      // Auto-show card when result is ready
-      showCoachingCard(composeEl);
+      // The Applied pill follows what is in the box, never the undo stack.
+      if (state.appliedEventId && state.appliedEventId === data.result?.event_id) {
+        markUseThisApplied(body);
+      }
+      // Auto-show when a result is ready — for the active compose only.
+      if (autoOpen) showCoachingCard(composeEl);
       break;
   }
 }
@@ -1113,13 +1460,17 @@ function updateCard(composeEl, data) {
 // Place the card in viewport coords, anchored to the button. Host-relative CSS
 // placement was deleted — under position:fixed on body those rules pin to the
 // viewport corner / use viewport percentages (WL-050 verification trap).
+// WL-091: the card also stays clear of Gmail's Send row; when neither above nor
+// below has room it moves to the left of the button.
 function positionCoachingCard(composeEl) {
-  const card = composeEl?._wlCard;
-  const btn = composeEl?._wlBtn;
+  if (!isActive(composeEl)) return;
+  const state = getState(composeEl);
+  const card = document.getElementById(CARD_ID);
+  const btn = state?.btn;
   if (!card || !btn || card.style.display === 'none') return;
 
   if (!isAnchorVisible(btn)) {
-    hideCoachingCard(composeEl);
+    hideCoachingCard();
     return;
   }
 
@@ -1128,27 +1479,37 @@ function positionCoachingCard(composeEl) {
   const cardWidth = card.getBoundingClientRect().width || CARD_WIDTH_PX;
   if (cardHeight <= 0) return;
 
+  // The button sits in the Send row; keep the whole row clear, not just the button.
+  let anchorTop = btnRect.top;
+  let anchorBottom = btnRect.bottom;
+  const footer = state.footer || findVisibleComposeFooter(composeEl, state.host);
+  if (footer) {
+    const fr = footer.getBoundingClientRect();
+    if (fr.height > 0 && fr.bottom > 0 && fr.top < window.innerHeight) {
+      anchorTop = Math.min(anchorTop, fr.top);
+      anchorBottom = Math.max(anchorBottom, fr.bottom);
+    }
+  }
+
   const minTop = GMAIL_TOP_CHROME_PX + CARD_VIEWPORT_PAD_PX;
   const maxBottom = window.innerHeight - CARD_VIEWPORT_PAD_PX;
-  const spaceAbove = btnRect.top - minTop - CARD_GAP_PX;
-  const spaceBelow = maxBottom - btnRect.bottom - CARD_GAP_PX;
+  const spaceAbove = anchorTop - minTop - CARD_GAP_PX;
+  const spaceBelow = maxBottom - anchorBottom - CARD_GAP_PX;
 
   let top;
+  let left = btnRect.right - cardWidth;
   if (cardHeight <= spaceAbove) {
-    top = btnRect.top - CARD_GAP_PX - cardHeight;
+    top = anchorTop - CARD_GAP_PX - cardHeight;
   } else if (cardHeight <= spaceBelow) {
-    top = btnRect.bottom + CARD_GAP_PX;
-  } else if (spaceBelow >= spaceAbove) {
-    top = Math.min(btnRect.bottom + CARD_GAP_PX, maxBottom - cardHeight);
-    top = Math.max(minTop, top);
+    top = anchorBottom + CARD_GAP_PX;
   } else {
-    top = Math.max(minTop, btnRect.top - CARD_GAP_PX - cardHeight);
-    top = Math.min(top, maxBottom - cardHeight);
+    // No room either side: to the left of the button, clamped vertically.
+    left = btnRect.left - CARD_GAP_PX - cardWidth;
+    top = Math.min(btnRect.bottom - cardHeight, maxBottom - cardHeight);
     top = Math.max(minTop, top);
   }
 
-  // Align to the button's right edge, clamped inside the viewport.
-  let left = btnRect.right - cardWidth;
+  // Clamped inside the viewport.
   left = Math.max(
     CARD_VIEWPORT_PAD_PX,
     Math.min(left, window.innerWidth - CARD_VIEWPORT_PAD_PX - cardWidth)
@@ -1156,6 +1517,50 @@ function positionCoachingCard(composeEl) {
 
   card.style.top = `${Math.round(top)}px`;
   card.style.left = `${Math.round(left)}px`;
+}
+
+// ─── Dismissal: one click and one keydown listener for the one card ──
+// A click inside the active compose keeps the card open (WL-008); Send and
+// Discard close it at once; a click into another compose is a switch (the
+// focusin already did it, and activate decided the card); Gmail's own popovers
+// are neutral; anything else closes it. Escape closes it unless something
+// closer to the user already consumed the key.
+function isSendOrDiscard(el) {
+  const control = el.closest('[role="button"]');
+  if (!control || !control.closest('.aDh')) return false;
+  const label = control.getAttribute('aria-label') || control.getAttribute('data-tooltip') || '';
+  return /^(Send|Discard)/.test(label);
+}
+
+function onDocumentClick(e) {
+  const target = e.target;
+  if (!(target instanceof Node) || !target.isConnected) return;
+  if (!isCardOpen()) return;
+  const el = target instanceof Element ? target : target.parentElement;
+  if (!el) return;
+  if (el.closest('.wl-card, .wl-btn-wrap')) return;
+
+  const active = getState(activeComposeEl);
+  if (active) {
+    const surface = composeSurfaceFor(el);
+    if (surface && surface === composeSurfaceFor(active.el)) {
+      if (isSendOrDiscard(el)) hideCoachingCard();
+      return;
+    }
+    const other = composeForNode(el);
+    if (other && other !== active.el && getState(other)) {
+      activate(other);
+      return;
+    }
+    if (el.closest('[role="menu"], [role="listbox"]')) return;
+    if (el.closest('[role="dialog"]') && !other) return; // a Gmail popover, not a compose
+  }
+  hideCoachingCard();
+}
+
+function onDocumentKeydown(e) {
+  if (e.key !== 'Escape' || e.defaultPrevented || !isCardOpen()) return;
+  hideCoachingCard();
 }
 
 function renderResult(container, result, recipientEmails, composeEl) {
@@ -1230,11 +1635,11 @@ function renderResult(container, result, recipientEmails, composeEl) {
   }
 
   // Wire up "Regenerate" — does not push; wakes primary on next result.
+  // Coaches the source draft behind this card, not the box (WL-004).
   const regenBtn = container.querySelector('[data-action="regen"]');
   if (regenBtn) {
     regenBtn.addEventListener('click', () => {
-      lastDraft = '';
-      analyzeCurrentDraft();
+      analyzeCurrentDraft(composeEl, { regen: true });
     });
   }
 
@@ -1243,24 +1648,33 @@ function renderResult(container, result, recipientEmails, composeEl) {
   syncUseThisEligibility(container, composeEl);
 }
 
-// ─── Input handler with debounce ─────────────────────────────────────
-function onComposeInput() {
-  if (applyingRewrite) return;
-  clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(() => analyzeCurrentDraft(), DEBOUNCE_MS);
-}
-
-async function analyzeCurrentDraft() {
-  if (!activeComposeEl) return;
-
-  // Bind this run to the compose that started it. After every await, bail if the
-  // user has switched away — otherwise a stale result paints (and Apply writes) the wrong draft.
-  const composeEl = activeComposeEl;
+// Two pieces of state that look alike and must never be merged:
+//   state.lastDraft    — dedupe key. Always the live zone-1 text, on every path.
+//   composeEl._wlSource — what the card on screen was coached from ({ draft,
+//                         subject }). Apply never touches it; undo restores it.
+// After "Use this" the box holds our own rewrite, so any path that reads the
+// box to find "what the user wrote" gets the rewrite. Regenerate passes
+// `{ regen: true }` and coaches the source instead (WL-004).
+async function analyzeCurrentDraft(composeEl, opts = {}) {
+  // This run belongs to one compose. After every await, bail if that compose is
+  // gone or a newer run has started — otherwise a stale result paints (and
+  // Apply writes) the wrong draft.
+  const state = getState(composeEl);
+  if (!isAlive(state)) return;
 
   // Zone 1 only — not the signature, quoted thread, or Wavelength footer.
   // See docs/plans/read-path-zone1.md. Must not mirror write-path refusal.
-  const draft = extractZone1Draft(composeEl);
-  if (!draft || draft.length < 5 || draft === lastDraft) return;
+  const live = extractZone1Draft(composeEl);
+  // Regenerate coaches the source — unless the box holds an edit nobody has
+  // analysed yet (live !== lastDraft). The user typed that, so coach it.
+  const source = opts.regen && live === state.lastDraft ? composeEl._wlSource : null;
+  const draft = source ? source.draft : live;
+  if (!draft || draft.length < 5) return;
+  if (!opts.regen && live === state.lastDraft) return;
+  const subject = source ? source.subject : extractSubjectFromCompose(composeEl);
+  // Read here, before any await, so it describes the same DOM as the draft.
+  // Live even on the regen path: the signature belongs to the compose now.
+  const hasSignature = resolveZones(composeEl).signatureFollowsZone1;
 
   const recipientEmails = extractRecipientEmails(composeEl);
 
@@ -1280,20 +1694,32 @@ async function analyzeCurrentDraft() {
 
   updateCard(composeEl, { status: 'analyzing' });
 
+  const seq = ++state.runSeq;
+  const stale = () => !isAlive(state) || seq !== state.runSeq;
+
   const recipientIds = await resolveEmails(recipientEmails);
-  if (activeComposeEl !== composeEl) return;
+  if (stale()) return;
 
   if (recipientIds.length === 0) {
     updateCard(composeEl, { status: 'no-profile', emails: recipientEmails });
     return;
   }
 
-  // Stamp only once analysis actually starts. Earlier returns must leave lastDraft
-  // clear so adding a recipient (or fixing profile) can retry without a body edit.
-  lastDraft = draft;
+  // Stamp only once analysis actually starts. On the live path an early return
+  // leaves lastDraft behind the box, so adding a recipient (or fixing a profile)
+  // retries without a body edit. On the regen path the key already matches the
+  // box, so that retry needs another Regenerate (which the hint cards do not
+  // offer) or a body edit. Blanking it here instead would let the next Gmail
+  // mutation re-coach the rewrite through a path nobody clicked.
+  // The key is the LIVE text even on the source path, for the same reason.
+  state.lastDraft = live;
+  composeEl._wlSource = Object.freeze({ draft, subject });
+
+  // Live path: blank so the next mutation retries. Source path: keep the key
+  // aligned with the box, or that retry would coach the rewrite.
+  const keyAfterError = source ? live : '';
 
   try {
-    const currentSubject = extractSubjectFromCompose(composeEl);
     const result = await chrome.runtime.sendMessage({
       type: 'ANALYZE',
       body: {
@@ -1301,25 +1727,34 @@ async function analyzeCurrentDraft() {
         recipient_ids: recipientIds,
         platform: 'gmail',
         context_type: 'email',
-        subject: currentSubject || undefined,
+        subject: subject || undefined,
+        has_signature: hasSignature,
       },
     });
 
-    if (activeComposeEl !== composeEl) return;
+    if (stale()) return;
 
     if (result.error) {
-      lastDraft = '';
-      updateCard(composeEl, { status: 'error', message: result.error });
+      state.lastDraft = keyAfterError;
+      reportAnalysisError(composeEl, result.error);
     } else {
-      lastRewrite = result.suggested_rewrite || '';
-      lastEventId = result.event_id || null;
+      state.lastEventId = result.event_id || null;
       updateCard(composeEl, { status: 'result', result, recipientEmails });
     }
   } catch (err) {
-    if (activeComposeEl !== composeEl) return;
-    lastDraft = '';
-    updateCard(composeEl, { status: 'error', message: err.message });
+    if (stale()) return;
+    state.lastDraft = keyAfterError;
+    reportAnalysisError(composeEl, err.message);
   }
+}
+
+// A session error means the token this tab believed in is gone (sign-out in
+// the popup never reaches here, WL-024). Drop the flag so the next focus
+// re-asks the background, and show the sign-in sentence, never the raw text.
+function reportAnalysisError(composeEl, message) {
+  const session = isSessionError(message);
+  if (session) hasToken = false;
+  updateCard(composeEl, { status: 'error', message: session ? SESSION_ERROR_MESSAGE : message });
 }
 
 // ─── Recipient extraction ────────────────────────────────────────────
@@ -1338,7 +1773,7 @@ function isComposeMessageEditable(el) {
   if (el.getAttribute('contenteditable') !== 'true') return false;
   const label = el.getAttribute('aria-label');
   if (!label) return false;
-  // Same surfaces observeComposeWindows attaches to.
+  // The same two surfaces discovery registers (COMPOSE_EDITABLE_SELECTOR).
   if (label === 'Message Body') return true;
   return !!el.closest('[role="dialog"]');
 }
@@ -1401,20 +1836,20 @@ async function resolveEmails(emails) {
   const ids = [];
   for (const email of emails.slice(0, 1)) {
     try {
-      if (emailCache.has(email)) {
-        const cachedId = emailCache.get(email);
-        if (cachedId) ids.push(cachedId);
+      const hit = emailCache.get(email);
+      if (hit && (hit.id || Date.now() - hit.at < EMAIL_NEGATIVE_TTL_MS)) {
+        if (hit.id) ids.push(hit.id);
         continue;
       }
       const result = await chrome.runtime.sendMessage({ type: 'RESOLVE_EMAIL', email });
       if (result?.user_id) {
-        emailCache.set(email, result.user_id);
+        emailCache.set(email, { id: result.user_id, at: Date.now() });
         ids.push(result.user_id);
       } else {
-        emailCache.set(email, null);
+        emailCache.set(email, { id: null, at: Date.now() });
       }
     } catch {
-      emailCache.set(email, null);
+      emailCache.set(email, { id: null, at: Date.now() });
     }
   }
   return ids;
@@ -1466,10 +1901,10 @@ function syncUseThisEligibility(container, composeEl) {
     container.querySelector('.wl-refuse-reason')?.remove();
   }
 
-  if (activeComposeEl) positionCoachingCard(activeComposeEl);
+  if (isActive(composeEl)) positionCoachingCard(composeEl);
 }
 
-function showRewriteRefusal(container) {
+function showRewriteRefusal(container, composeEl) {
   const useBtn = container.querySelector('[data-action="use"]');
   if (useBtn) {
     useBtn.disabled = true;
@@ -1481,9 +1916,9 @@ function showRewriteRefusal(container) {
   showReasonPanel(container, REFUSAL_REASON, 'wl-refuse-reason');
 
   // Condition 2: do not wipe the Undo icon when the stack is non-empty.
-  if (activeComposeEl) {
-    rehydrateActionRow(container, activeComposeEl);
-    positionCoachingCard(activeComposeEl);
+  if (composeEl) {
+    rehydrateActionRow(container, composeEl);
+    positionCoachingCard(composeEl);
   }
 }
 
@@ -1502,8 +1937,9 @@ function onFooterOptChange(container, composeEl, checked) {
   const editable = getComposeEditable(composeEl);
   if (!editable) return;
 
-  applyingRewrite = true;
-  clearTimeout(debounceTimer);
+  const state = getState(composeEl);
+  setApplying(state);
+  clearTimeout(state?.debounceTimer);
   try {
     if (checked) {
       insertZone4Footer(editable, buildWavelengthFooter());
@@ -1511,16 +1947,14 @@ function onFooterOptChange(container, composeEl, checked) {
       stripWavelengthFooters(editable);
     }
     editable.dispatchEvent(new Event('input', { bubbles: true }));
-    lastDraft = extractZone1Draft(editable);
+    if (state) state.lastDraft = extractZone1Draft(editable);
 
     const stack = composeEl._wlUndoStack;
     if (stack && stack.length > 0) {
       stack[stack.length - 1].hadFooter = !!checked;
     }
   } finally {
-    setTimeout(() => {
-      applyingRewrite = false;
-    }, 500);
+    releaseApplying(state);
   }
 }
 
@@ -1531,8 +1965,10 @@ function applyRewrite(rewriteText, container, composeEl, eventId) {
     container.querySelector('[data-action="footer-opt"]')?.checked === true;
   if (composeEl) composeEl._wlWantFooter = includeFooter;
 
+  const state = getState(composeEl);
+
   // Record suggestion acceptance and re-score in the backend
-  const acceptEventId = eventId || lastEventId;
+  const acceptEventId = eventId || state?.lastEventId;
   if (acceptEventId) {
     chrome.runtime.sendMessage({
       type: 'ACCEPT_SUGGESTION',
@@ -1546,8 +1982,8 @@ function applyRewrite(rewriteText, container, composeEl, eventId) {
 
   // Guard: prevent our own DOM changes from triggering detach/re-analysis.
   // Must clear on every path, including refusal.
-  applyingRewrite = true;
-  clearTimeout(debounceTimer);
+  setApplying(state);
+  clearTimeout(state?.debounceTimer);
   clearUndoRefusal(container);
 
   try {
@@ -1555,7 +1991,7 @@ function applyRewrite(rewriteText, container, composeEl, eventId) {
     const zones = resolveZones(editable);
 
     if (shouldRefuseUseRewrite(zones, editable)) {
-      showRewriteRefusal(container);
+      showRewriteRefusal(container, composeEl);
       return;
     }
 
@@ -1564,7 +2000,8 @@ function applyRewrite(rewriteText, container, composeEl, eventId) {
     const snapshot = {
       zone1Html: serializeZone1Html(editable),
       subject: subjectBefore,
-      lastDraft,
+      lastDraft: state?.lastDraft ?? '',
+      source: composeEl._wlSource, // frozen; safe to share by reference
       hadFooter: includeFooter,
       wroteBody: true,
       subjectChanged: false,
@@ -1575,26 +2012,27 @@ function applyRewrite(rewriteText, container, composeEl, eventId) {
     const footerHtml = includeFooter ? buildWavelengthFooter() : '';
     const wrote = replaceZone1Content(editable, zones, rewriteHtml, footerHtml);
     if (!wrote.ok) {
-      showRewriteRefusal(container);
+      showRewriteRefusal(container, composeEl);
       return;
     }
 
     editable.dispatchEvent(new Event('input', { bubbles: true }));
     // Same string the analyse path stores — zone-1 plain text from the DOM.
-    lastDraft = extractZone1Draft(editable);
+    if (state) state.lastDraft = extractZone1Draft(editable);
 
     updateSubjectIfNeeded(rewriteText, composeEl);
     snapshot.subjectChanged = subjectBefore !== getSubjectValue(composeEl);
     pushUndoSnapshot(composeEl, snapshot);
+    if (state) {
+      state.appliedEventId = acceptEventId || null;
+      applyButtonVisuals(state);
+    }
 
     markUseThisApplied(container);
     rehydrateActionRow(container, composeEl);
     if (activeComposeEl) positionCoachingCard(activeComposeEl);
   } finally {
-    // Release the guard after Gmail has settled its DOM updates
-    setTimeout(() => {
-      applyingRewrite = false;
-    }, 500);
+    releaseApplying(state);
   }
 }
 
@@ -1611,19 +2049,16 @@ if (IN_EXTENSION) window.addEventListener('message', (event) => {
   if (event.origin !== APP_URL) return;
   if (event.source !== window) return;
   if (event.data?.type === 'WAVELENGTH_AUTH' && typeof event.data.token === 'string') {
-    chrome.runtime.sendMessage({
-      type: 'SET_TOKEN',
-      token: event.data.token,
-      refresh_token: event.data.refresh_token,
-      expires_at: event.data.expires_at,
-    });
-  }
-});
-
-// Listen for auth success from background to re-check auth state
-if (IN_EXTENSION) chrome.runtime.onMessage.addListener((message) => {
-  if (message.type === 'AUTH_SUCCESS') {
-    hasToken = true;
+    chrome.runtime
+      .sendMessage({
+        type: 'SET_TOKEN',
+        token: event.data.token,
+        refresh_token: event.data.refresh_token,
+        expires_at: event.data.expires_at,
+      })
+      .then(() => checkAuth())
+      .then(reconcileActive)
+      .catch(() => {});
   }
 });
 
@@ -1674,5 +2109,11 @@ if (typeof module !== 'undefined' && module.exports) {
     rememberFooterOpt,
     buildWavelengthFooter,
     escapeHtml,
+    registerCompose,
+    activate,
+    teardownCompose,
+    installDiscovery,
+    checkAuth,
+    getComposeSnapshot,
   };
 }
