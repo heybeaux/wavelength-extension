@@ -57,18 +57,15 @@
   font-family: 'WL Inter Tight', -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
 }
 
-.wl-btn:hover {
+/* Hovered, or a rewrite is waiting (the badge says so too). */
+.wl-btn:hover,
+.wl-btn.wl-ready {
   box-shadow: 0 4px 16px rgba(212, 106, 58, 0.45);
 }
 
 .wl-btn:focus-visible {
   outline: 2px solid #D46A3A;
   outline-offset: 2px;
-}
-
-/* A rewrite is waiting (the badge says so too). */
-.wl-btn.wl-ready {
-  box-shadow: 0 4px 16px rgba(212, 106, 58, 0.45);
 }
 
 .wl-btn.wl-loading {

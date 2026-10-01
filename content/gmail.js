@@ -72,7 +72,6 @@ const emailCache = new Map();
 let hasToken = false;
 let lastToken = null;
 let lastAuthCheckAt = 0;
-let cachedUserInfo = null;
 
 const APPLY_SETTLE_MS = 500; // Gmail settles its DOM churn after our own writes
 const AUTH_RECHECK_MS = 5000; // sign-in never reaches this tab (WL-024): re-ask on focus, throttled
@@ -121,11 +120,16 @@ function createComposeState(el) {
     recipientPollTimer: null,
     applyingTimer: null,
     contentObserver: null,
+    recipientObserver: null,
     closeObserver: null,
     footerObserver: null,
     hostResize: null,
     onInput: null,
     lastDraft: '', // dedupe key: always the live zone-1 text (see analyzeCurrentDraft)
+    lastRecipients: '', // the other half of the key: the To row the last analysis ran against
+    retryPending: false, // the card shows a no-profile or error state worth retrying on the next body change
+    rowOnlyRun: false, // the pending debounce came from the To row alone: never a retry
+    heldRun: null, // a debounce our own write cancelled ({ rowOnly }); re-armed once the write settles
     lastEventId: null,
     runSeq: 0, // bumped per ANALYZE request; an older response never overwrites a newer one
     applying: false, // our own write is in progress: observers and input must stand down
@@ -174,7 +178,26 @@ function releaseApplying(state) {
   state.applyingTimer = setTimeout(() => {
     state.applying = false;
     state.applyingTimer = null;
+    // A run our write cancelled gets its turn now; the key dedupes it if
+    // nothing changed (a chip swapped just before "Use this" did change).
+    const held = state.heldRun;
+    state.heldRun = null;
+    if (held && isAlive(state)) scheduleAnalysis(state, held);
   }, APPLY_SETTLE_MS);
+}
+
+// Our own writes (apply, undo, footer toggle) must not let a pending run read
+// the box mid-write, but must not lose it either: hold it and let
+// releaseApplying re-arm it.
+function holdPendingAnalysis(state, { rowOnly } = {}) {
+  if (!state) return;
+  if (state.debounceTimer !== null) {
+    state.heldRun = { rowOnly: state.rowOnlyRun };
+    clearTimeout(state.debounceTimer);
+    state.debounceTimer = null;
+    state.rowOnlyRun = false;
+  }
+  if (rowOnly !== undefined) state.heldRun = { rowOnly: rowOnly || !!state.heldRun?.rowOnly };
 }
 
 // ─── Bootstrap ───────────────────────────────────────────────────────
@@ -189,24 +212,6 @@ async function checkAuth() {
   if (token !== lastToken) emailCache.clear(); // one account's visibility never serves another
   lastToken = token;
   hasToken = !!token;
-  if (hasToken) fetchUserInfo();
-}
-
-async function fetchUserInfo() {
-  try {
-    const info = await chrome.runtime.sendMessage({ type: 'GET_USER_INFO' });
-    if (info && !info.error) {
-      cachedUserInfo = info;
-    }
-  } catch {
-    // Non-critical — button will show "W" fallback
-  }
-}
-
-function getUserInitial() {
-  const name = cachedUserInfo?.displayName || cachedUserInfo?.name;
-  if (name) return name.trim().charAt(0).toUpperCase();
-  return 'W';
 }
 
 // Sign-in and sign-out never reach this tab as messages (the background's
@@ -303,7 +308,8 @@ function discover(node) {
   }
   if (!isActive(el)) activate(el);
   // First focus after a sign-in: a compose stuck on a session error is coached
-  // again. The error path blanked its dedupe key, so this run never repeats.
+  // again. The error path set retryPending, and the run clears it, so this
+  // never repeats.
   if (state.status === 'error' && isSessionError(state.card?.data?.message)) {
     scheduleAnalysis(state);
   }
@@ -351,9 +357,63 @@ function pollForRecipientThenAnalyze(state) {
   tick();
 }
 
-function scheduleAnalysis(state) {
+// One debounce per compose. A row-only schedule (the To row moved, nothing
+// else) never retries a failed or no-profile run: Gmail collapses and expands
+// the row on every focus and blur, and that must not re-send a request. Any
+// other trigger armed while the timer is pending upgrades the run.
+function scheduleAnalysis(state, { rowOnly = false } = {}) {
+  state.rowOnlyRun = state.debounceTimer !== null ? state.rowOnlyRun && rowOnly : rowOnly;
   clearTimeout(state.debounceTimer);
-  state.debounceTimer = setTimeout(() => analyzeCurrentDraft(state.el), DEBOUNCE_MS);
+  state.debounceTimer = setTimeout(() => {
+    state.debounceTimer = null;
+    const opts = state.rowOnlyRun ? { rowOnly: true } : {};
+    state.rowOnlyRun = false;
+    analyzeCurrentDraft(state.el, opts);
+  }, DEBOUNCE_MS);
+}
+
+// The To row is an input like the body: a chip added or removed re-runs the
+// analysis through the same debounce (WL-007, WL-010). Observed on the
+// compose's close root (the popup dialog, or the inline reply's `.M9`), else
+// the compose surface, not on the row itself: the row does not exist yet when
+// an empty compose registers, and Gmail rebuilds it on a From-alias switch.
+// Only mutations that touch a recipient row count. The editable has its own
+// observer, our button lives in the Send row, and Gmail's autosave and toolbar
+// churn must never hold the typing debounce back or loop through our own
+// badge writes. No `applying` gate: apply never writes the row, and a chip
+// added during that window must not be lost. While the attach-time poll is
+// waiting for the row it owns the first run.
+function observeRecipientRow(state) {
+  const root = state.closeRoot || composeSurfaceFor(state.el);
+  if (!root || state.el.contains(root)) return;
+  state.recipientObserver = new MutationObserver((mutations) => {
+    if (state.recipientPollTimer !== null) return;
+    if (!mutations.some((m) => touchesRecipientRow(m, root))) return;
+    scheduleAnalysis(state, { rowOnly: true });
+  });
+  state.recipientObserver.observe(root, { childList: true, subtree: true });
+}
+
+// A chip added or removed mutates the row it sits in (the target); a row
+// created or rebuilt arrives as an added node. Walked only up to the observed
+// root, so a label outside the compose can never make every mutation count.
+function touchesRecipientRow(mutation, root) {
+  if (insideRecipientRow(mutation.target, root)) return true;
+  for (const node of mutation.addedNodes) {
+    if (!(node instanceof Element)) continue;
+    if (node.matches(RECIPIENT_ROW_SELECTOR) || node.querySelector(RECIPIENT_ROW_SELECTOR)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function insideRecipientRow(node, root) {
+  let el = node instanceof Element ? node : node?.parentElement;
+  for (; el && el !== root; el = el.parentElement) {
+    if (el.matches(RECIPIENT_ROW_SELECTOR)) return true;
+  }
+  return false;
 }
 
 // ─── Register / activate / tear down ─────────────────────────────────
@@ -392,6 +452,8 @@ function registerCompose(composeEl) {
     scheduleAnalysis(state);
   });
   state.contentObserver.observe(composeEl, { childList: true, subtree: true });
+
+  observeRecipientRow(state);
 
   // Watch for compose close. A childList observer on the dialog's parent never
   // sees our own writes, so it needs no `applying` gate. Gmail re-parents
@@ -453,6 +515,8 @@ function teardownCompose(stateOrEl) {
 
   state.contentObserver?.disconnect();
   state.contentObserver = null;
+  state.recipientObserver?.disconnect();
+  state.recipientObserver = null;
   state.closeObserver?.disconnect();
   state.closeObserver = null;
   state.footerObserver?.disconnect();
@@ -783,6 +847,7 @@ function syncSubjectRow(container, result, composeEl) {
         zone1Html: null,
         subject: subjectBefore,
         lastDraft: getState(composeEl)?.lastDraft ?? '',
+        lastRecipients: getState(composeEl)?.lastRecipients ?? '',
         hadFooter: false,
         wroteBody: false,
         subjectChanged: true,
@@ -814,7 +879,7 @@ function undoRewrite(container, composeEl) {
   const entry = stack[stack.length - 1];
   const state = getState(composeEl);
   setApplying(state);
-  clearTimeout(state?.debounceTimer);
+  holdPendingAnalysis(state);
   clearUndoRefusal(container);
 
   try {
@@ -868,7 +933,16 @@ function undoRewrite(container, composeEl) {
       setSubjectValue(composeEl, entry.subject);
     }
 
-    if (state) state.lastDraft = entry.lastDraft;
+    if (state) {
+      state.lastDraft = entry.lastDraft;
+      if (entry.lastRecipients !== undefined) state.lastRecipients = entry.lastRecipients;
+      // The row may have moved on since this entry's card (swap, then undo):
+      // the card is a recipient behind, so coach the restored text for the
+      // row as it is now, once the write settles. Same key otherwise: dedupes.
+      if (state.lastRecipients !== extractRecipientEmails(composeEl).join('\n')) {
+        holdPendingAnalysis(state, { rowOnly: true });
+      }
+    }
     // The box is back to what this entry's card was coached from.
     if (entry.wroteBody) composeEl._wlSource = entry.source || null;
     stack.pop();
@@ -1307,7 +1381,7 @@ const BUTTON_LABELS = {
   ready: 'Wavelength, rewrite ready',
   'no-recipient': 'Wavelength, add a recipient',
   'no-profile': "Wavelength, recipient hasn't set up a profile",
-  'error-recipients': 'Wavelength, one recipient at a time',
+  'many-recipients': 'Wavelength, one recipient at a time',
   'error-session': 'Wavelength, sign in again',
   error: 'Wavelength, something went wrong',
 };
@@ -1326,7 +1400,6 @@ function buttonLabelFor(state) {
   if (state.status === 'attention') return BUTTON_LABELS[data?.status] || BUTTON_LABELS.error;
   if (state.status === 'error') {
     const message = data?.message || '';
-    if (/one recipient at a time/i.test(message)) return BUTTON_LABELS['error-recipients'];
     if (isSessionError(message)) return BUTTON_LABELS['error-session'];
     return BUTTON_LABELS.error;
   }
@@ -1365,7 +1438,9 @@ function statusForCard(cardStatus) {
   if (cardStatus === 'result') return 'ready';
   if (cardStatus === 'analyzing') return 'analyzing';
   if (cardStatus === 'error') return 'error';
-  if (cardStatus === 'no-recipient' || cardStatus === 'no-profile') return 'attention';
+  if (cardStatus === 'no-recipient' || cardStatus === 'many-recipients' || cardStatus === 'no-profile') {
+    return 'attention';
+  }
   return 'idle';
 }
 
@@ -1422,6 +1497,16 @@ function paintCard(composeEl, data, { autoOpen }) {
     case 'no-recipient':
       setCardHeader(card, null);
       body.innerHTML = `<p class="wl-hint">Add a recipient to get suggestions.</p>`;
+      break;
+
+    // A boundary, not a failure: same treatment as no-recipient (WL-010).
+    case 'many-recipients':
+      setCardHeader(card, null);
+      body.innerHTML = `
+        <p class="wl-hint">
+          Wavelength coaches one recipient at a time. Keep one here and write to the others in a separate draft.
+        </p>
+      `;
       break;
 
     case 'no-profile':
@@ -1650,6 +1735,8 @@ function renderResult(container, result, recipientEmails, composeEl) {
 
 // Two pieces of state that look alike and must never be merged:
 //   state.lastDraft    — dedupe key. Always the live zone-1 text, on every path.
+//                        state.lastRecipients is its other half: the same text
+//                        addressed to someone else is a new draft (WL-007).
 //   composeEl._wlSource — what the card on screen was coached from ({ draft,
 //                         subject }). Apply never touches it; undo restores it.
 // After "Use this" the box holds our own rewrite, so any path that reads the
@@ -1670,54 +1757,60 @@ async function analyzeCurrentDraft(composeEl, opts = {}) {
   const source = opts.regen && live === state.lastDraft ? composeEl._wlSource : null;
   const draft = source ? source.draft : live;
   if (!draft || draft.length < 5) return;
-  if (!opts.regen && live === state.lastDraft) return;
+  const recipientEmails = extractRecipientEmails(composeEl);
+  const recipients = recipientEmails.join('\n');
+  // The key (lastDraft, lastRecipients) always describes what the card shows,
+  // so the same text for the same row is never coached twice, and any change
+  // to either re-runs: adding a chip after writing, removing the extra one,
+  // switching back to the recipient whose result the card had (WL-007).
+  // Every path that paints a card stamps both halves. A no-profile card and a
+  // failed request also set retryPending, so the next body-driven run retries
+  // them (the address may sign up, the request may succeed); a row-only run
+  // never does, or Gmail folding the To row on blur would re-send. On the regen
+  // path nothing is retried: the box holds the rewrite, and coaching it through
+  // a path nobody clicked is the WL-004 trap.
+  const retry = state.retryPending && !opts.rowOnly;
+  if (!opts.regen && !retry && live === state.lastDraft && recipients === state.lastRecipients) {
+    return;
+  }
   const subject = source ? source.subject : extractSubjectFromCompose(composeEl);
   // Read here, before any await, so it describes the same DOM as the draft.
   // Live even on the regen path: the signature belongs to the compose now.
   const hasSignature = resolveZones(composeEl).signatureFollowsZone1;
 
-  const recipientEmails = extractRecipientEmails(composeEl);
+  // This run owns the card from here. Bumped before the hints too, so a
+  // response still in flight when the row changed is dropped, never painted
+  // over the hint.
+  const seq = ++state.runSeq;
+  const stale = () => !isAlive(state) || seq !== state.runSeq;
+  state.lastDraft = live; // the LIVE text even on the source path (WL-004)
+  state.lastRecipients = recipients;
+  state.retryPending = false;
 
   if (recipientEmails.length === 0) {
     updateCard(composeEl, { status: 'no-recipient' });
     return;
   }
 
+  // Said the moment the second chip lands (the row observer), as a hint like
+  // no-recipient rather than an error; removing a chip brings coaching back.
   if (recipientEmails.length > 1) {
-    updateCard(composeEl, {
-      status: 'error',
-      message:
-        'Wavelength coaches one recipient at a time. Remove one, or open a separate draft.',
-    });
+    updateCard(composeEl, { status: 'many-recipients' });
     return;
   }
 
   updateCard(composeEl, { status: 'analyzing' });
 
-  const seq = ++state.runSeq;
-  const stale = () => !isAlive(state) || seq !== state.runSeq;
-
   const recipientIds = await resolveEmails(recipientEmails);
   if (stale()) return;
 
   if (recipientIds.length === 0) {
+    state.retryPending = !source;
     updateCard(composeEl, { status: 'no-profile', emails: recipientEmails });
     return;
   }
 
-  // Stamp only once analysis actually starts. On the live path an early return
-  // leaves lastDraft behind the box, so adding a recipient (or fixing a profile)
-  // retries without a body edit. On the regen path the key already matches the
-  // box, so that retry needs another Regenerate (which the hint cards do not
-  // offer) or a body edit. Blanking it here instead would let the next Gmail
-  // mutation re-coach the rewrite through a path nobody clicked.
-  // The key is the LIVE text even on the source path, for the same reason.
-  state.lastDraft = live;
   composeEl._wlSource = Object.freeze({ draft, subject });
-
-  // Live path: blank so the next mutation retries. Source path: keep the key
-  // aligned with the box, or that retry would coach the rewrite.
-  const keyAfterError = source ? live : '';
 
   try {
     const result = await chrome.runtime.sendMessage({
@@ -1735,7 +1828,7 @@ async function analyzeCurrentDraft(composeEl, opts = {}) {
     if (stale()) return;
 
     if (result.error) {
-      state.lastDraft = keyAfterError;
+      state.retryPending = !source;
       reportAnalysisError(composeEl, result.error);
     } else {
       state.lastEventId = result.event_id || null;
@@ -1743,7 +1836,7 @@ async function analyzeCurrentDraft(composeEl, opts = {}) {
     }
   } catch (err) {
     if (stale()) return;
-    state.lastDraft = keyAfterError;
+    state.retryPending = !source;
     reportAnalysisError(composeEl, err.message);
   }
 }
@@ -1815,10 +1908,16 @@ function extractRecipientEmails(composeEl) {
   const scope = findRecipientScope(composeEl);
   if (!scope) return emails;
 
-  const recipientChips = scope.querySelectorAll(RECIPIENT_CHIP_SELECTOR);
+  const chips = [...scope.querySelectorAll(RECIPIENT_CHIP_SELECTOR)].filter(isRecipientRowChip);
+  // Gmail's folded "Recipients" summary (`.aoD.hl`) keeps the previous
+  // addresses until the row is folded again, so while the row is open it can
+  // disagree with the live chips (probed 2026-09-24: a swap read as two
+  // recipients until blur). It counts only when no live chip exists, which is
+  // the reopened-draft case where the row has not rendered yet (WL-047).
+  const live = chips.filter((el) => !el.closest('.aoD.hl'));
+  const recipientChips = live.length > 0 ? live : chips;
 
   recipientChips.forEach((el) => {
-    if (!isRecipientRowChip(el)) return;
     const email =
       el.getAttribute('data-hovercard-id') ||
       el.getAttribute('email') ||
@@ -1939,7 +2038,7 @@ function onFooterOptChange(container, composeEl, checked) {
 
   const state = getState(composeEl);
   setApplying(state);
-  clearTimeout(state?.debounceTimer);
+  holdPendingAnalysis(state);
   try {
     if (checked) {
       insertZone4Footer(editable, buildWavelengthFooter());
@@ -1983,7 +2082,7 @@ function applyRewrite(rewriteText, container, composeEl, eventId) {
   // Guard: prevent our own DOM changes from triggering detach/re-analysis.
   // Must clear on every path, including refusal.
   setApplying(state);
-  clearTimeout(state?.debounceTimer);
+  holdPendingAnalysis(state);
   clearUndoRefusal(container);
 
   try {
@@ -2001,6 +2100,7 @@ function applyRewrite(rewriteText, container, composeEl, eventId) {
       zone1Html: serializeZone1Html(editable),
       subject: subjectBefore,
       lastDraft: state?.lastDraft ?? '',
+      lastRecipients: state?.lastRecipients ?? '',
       source: composeEl._wlSource, // frozen; safe to share by reference
       hadFooter: includeFooter,
       wroteBody: true,
