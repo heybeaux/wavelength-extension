@@ -500,7 +500,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.type === 'RESOLVE_EMAIL') {
     resolveEmail(request.email)
       .then(sendResponse)
-      .catch((err) => sendResponse({ error: err.message }));
+      .catch((err) => sendResponse({ error: err.message, status: err.status }));
     return true;
   }
 
@@ -556,7 +556,11 @@ async function handleApiCall(endpoint, method = 'GET', body = null) {
     throw new Error('Your session has expired. Please sign in again.');
   }
 
-  if (!res.ok) throw new Error('Something went wrong. Please try again.');
+  if (!res.ok) {
+    const error = new Error('Something went wrong. Please try again.');
+    error.status = res.status;
+    throw error;
+  }
   return res.json();
 }
 

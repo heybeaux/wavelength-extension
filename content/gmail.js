@@ -66,7 +66,7 @@ let bodyFollowRaf = null;
 let bodyFollowHandler = null;
 
 // email → { id, at }. Positive hits live for the page; a miss is retried after
-// EMAIL_NEGATIVE_TTL_MS (a recipient who signs up later, a transient error).
+// EMAIL_NEGATIVE_TTL_MS (a recipient who signs up later). Errors are not cached.
 // Cleared whenever the token changes.
 const emailCache = new Map();
 let hasToken = false;
@@ -1380,7 +1380,7 @@ const BUTTON_LABELS = {
   analyzing: 'Wavelength, writing a rewrite',
   ready: 'Wavelength, rewrite ready',
   'no-recipient': 'Wavelength, add a recipient',
-  'no-profile': "Wavelength, recipient hasn't set up a profile",
+  'no-profile': "Wavelength, recipient account not found",
   'many-recipients': 'Wavelength, one recipient at a time',
   'error-session': 'Wavelength, sign in again',
   error: 'Wavelength, something went wrong',
@@ -1513,7 +1513,7 @@ function paintCard(composeEl, data, { autoOpen }) {
       setCardHeader(card, null);
       body.innerHTML = `
         <p class="wl-hint">
-          ${escapeHtml(data.emails?.[0] || 'This recipient')} hasn't set up their profile yet.
+          We couldn't find a Wavelength account for ${escapeHtml(data.emails?.[0] || 'this recipient')}. Check that the email matches their Wavelength account.
         </p>
         <a class="wl-invite-btn" href="${APP_URL}/invite" target="_blank" rel="noopener noreferrer">Invite them</a>
       `;
@@ -1801,7 +1801,15 @@ async function analyzeCurrentDraft(composeEl, opts = {}) {
 
   updateCard(composeEl, { status: 'analyzing' });
 
-  const recipientIds = await resolveEmails(recipientEmails);
+  let recipientIds;
+  try {
+    recipientIds = await resolveEmails(recipientEmails);
+  } catch (err) {
+    if (stale()) return;
+    state.retryPending = !source;
+    reportAnalysisError(composeEl, err.message);
+    return;
+  }
   if (stale()) return;
 
   if (recipientIds.length === 0) {
@@ -1934,21 +1942,21 @@ function extractRecipientEmails(composeEl) {
 async function resolveEmails(emails) {
   const ids = [];
   for (const email of emails.slice(0, 1)) {
-    try {
-      const hit = emailCache.get(email);
-      if (hit && (hit.id || Date.now() - hit.at < EMAIL_NEGATIVE_TTL_MS)) {
-        if (hit.id) ids.push(hit.id);
-        continue;
-      }
-      const result = await chrome.runtime.sendMessage({ type: 'RESOLVE_EMAIL', email });
-      if (result?.user_id) {
-        emailCache.set(email, { id: result.user_id, at: Date.now() });
-        ids.push(result.user_id);
-      } else {
-        emailCache.set(email, { id: null, at: Date.now() });
-      }
-    } catch {
+    const hit = emailCache.get(email);
+    if (hit && (hit.id || Date.now() - hit.at < EMAIL_NEGATIVE_TTL_MS)) {
+      if (hit.id) ids.push(hit.id);
+      continue;
+    }
+    const result = await chrome.runtime.sendMessage({ type: 'RESOLVE_EMAIL', email });
+    if (result?.error && result.status === 404) {
       emailCache.set(email, { id: null, at: Date.now() });
+    } else if (result?.error) {
+      throw new Error(result.error);
+    } else if (typeof result?.user_id === 'string' && result.user_id) {
+      emailCache.set(email, { id: result.user_id, at: Date.now() });
+      ids.push(result.user_id);
+    } else {
+      throw new Error('Could not look up the recipient. Please try again.');
     }
   }
   return ids;
